@@ -46,7 +46,7 @@ export async function generateImage(
     ? `${prompt}. Style: ${options.style}. Aspect ratio: ${options.aspectRatio || '16:9'}`
     : `${prompt}. Aspect ratio: ${options?.aspectRatio || '16:9'}`;
 
-  const model = client.getGenerativeModel({ model: 'gemini-2.0-flash-preview-image-generation' });
+  const model = client.getGenerativeModel({ model: 'gemini-2.5-flash-image' });
   const result = await model.generateContent({
     contents: [{ role: 'user', parts: [{ text: `Generate an image: ${enhancedPrompt}` }] }],
     generationConfig: {
