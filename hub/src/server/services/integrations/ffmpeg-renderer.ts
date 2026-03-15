@@ -206,7 +206,11 @@ export async function renderVideo(options: FFmpegRenderOptions): Promise<FFmpegR
       console.log(`[FFmpeg] Encoding segment ${i + 1}/${imageCount}...`);
       options.onSegmentProgress?.(i + 1, imageCount);
 
-      // Single image → short video clip (MPEG-TS for seamless concat)
+      // Single image → video clip (MPEG-TS for seamless concat)
+      // Optimized for speed on serverless:
+      //   - No -threads limit (use all available cores)
+      //   - 15fps (sufficient for static images, 37% less encoding work)
+      //   - CRF 30 (acceptable quality for slideshow, faster encoding)
       await runFFmpeg([
         '-loop', '1',
         '-i', options.imagePaths[i],
@@ -214,9 +218,8 @@ export async function renderVideo(options: FFmpegRenderOptions): Promise<FFmpegR
         '-vf', `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:force_original_aspect_ratio=increase,crop=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT},setsar=1,format=yuv420p`,
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
-        '-crf', '28',
-        '-r', '24',
-        '-threads', '1',
+        '-crf', '30',
+        '-r', '15',
         '-an',  // No audio in segments
         '-y',
         segPath,
@@ -245,7 +248,6 @@ export async function renderVideo(options: FFmpegRenderOptions): Promise<FFmpegR
       '-b:a', '128k',
       '-shortest',
       '-movflags', '+faststart',
-      '-threads', '1',
       '-y',
       outputPath,
     ]);

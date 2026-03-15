@@ -302,6 +302,10 @@ export interface GenreImage {
  * Fetch images from Airtable for a specific genre, randomly shuffled.
  * Returns up to `count` images (default 20).
  *
+ * Supports both:
+ *   - Multiple records per genre (1 image per record)
+ *   - Single record per genre with multiple attachments
+ *
  * If no images found for the exact genre, tries broader fallback genres
  * before returning an empty array.
  */
@@ -315,16 +319,25 @@ export async function getGenreImages(genre: string, count = 20): Promise<GenreIm
     const filter = `{${GENRE_IMAGE_FIELD_MAP.genre}} = '${g}'`;
     const records = await listRecords(genreImagesTable, filter, 100);
 
-    const images = records
-      .map((record) => ({
-        id: record.id,
-        genre: record.fields[GENRE_IMAGE_FIELD_MAP.genre] || '',
-        imageUrl: extractAttachmentUrl(record.fields[GENRE_IMAGE_FIELD_MAP.image]),
-      }))
-      .filter((img) => img.imageUrl);
+    // Extract ALL images from ALL records (supports multiple attachments per record)
+    const images: GenreImage[] = [];
+    for (const record of records) {
+      const genreName = record.fields[GENRE_IMAGE_FIELD_MAP.genre] || '';
+      const attachments = record.fields[GENRE_IMAGE_FIELD_MAP.image];
+      if (Array.isArray(attachments)) {
+        // Multiple images attached to one record
+        for (const att of attachments) {
+          if (att.url) {
+            images.push({ id: record.id, genre: genreName, imageUrl: att.url });
+          }
+        }
+      } else if (typeof attachments === 'string' && attachments) {
+        images.push({ id: record.id, genre: genreName, imageUrl: attachments });
+      }
+    }
 
     if (images.length > 0) {
-      console.log(`[Airtable] Found ${images.length} images for genre "${g}" (requested "${genre}")`);
+      console.log(`[Airtable] Found ${images.length} images for genre "${g}" (requested "${genre}") from ${records.length} records`);
       const shuffled = shuffleArray(images);
       return shuffled.slice(0, count);
     }
