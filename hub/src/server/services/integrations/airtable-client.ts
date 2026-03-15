@@ -289,7 +289,7 @@ function extractAttachmentUrl(field: any): string {
  */
 const GENRE_IMAGE_FIELD_MAP = {
   genre: 'Genre',
-  image: 'Image',
+  image: 'Images',
 } as const;
 
 export interface GenreImage {
