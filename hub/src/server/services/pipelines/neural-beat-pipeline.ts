@@ -227,6 +227,11 @@ export class NeuralBeatPipeline {
         }
 
         console.log(`[NeuralBeatPipeline] All ${localImagePaths.length} images saved locally`);
+
+        // Free base64 image data from memory — images are now saved as files
+        // Each image is ~1-3 MB base64, so 6 images = ~6-18 MB freed
+        imageSetResult.images.length = 0;
+
         stepCompleted(steps[currentStepIndex]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -235,6 +240,8 @@ export class NeuralBeatPipeline {
       }
 
       // Step 6: FFmpeg renders multi-scene slideshow video (local, $0 cost)
+      // Free memory before render — imageSetResult held large base64 strings
+      if (global.gc) { try { global.gc(); } catch {} }
       currentStepIndex = 5;
       stepRunning(steps[currentStepIndex]);
       try {

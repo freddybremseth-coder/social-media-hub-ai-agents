@@ -95,10 +95,10 @@ function getFFmpegPath(): string {
 
 // ─── Constants ──────────────────────────────────────────────
 
-const FPS = 30;
-const OUTPUT_WIDTH = 1920;
-const OUTPUT_HEIGHT = 1080;
-const FADE_DURATION = 1.5; // crossfade overlap in seconds
+const FPS = 24; // 24fps saves ~20% memory vs 30fps
+const OUTPUT_WIDTH = 1280;
+const OUTPUT_HEIGHT = 720; // 720p uses 56% less memory than 1080p — YouTube upscales nicely
+const FADE_DURATION = 1.0; // shorter crossfade = less memory for xfade buffer
 
 // Fonts for text overlay (tried in order, first found is used)
 const FONT_PATHS = [
@@ -426,13 +426,14 @@ export async function renderVideo(options: FFmpegRenderOptions): Promise<FFmpegR
     const audioInputIndex = imageCount;
     args.push('-map', `[${finalLabel}]`, '-map', `${audioInputIndex}:a`);
 
-    // Encoding
+    // Encoding — optimized for low memory on Vercel serverless
     args.push(
+      '-threads', '1',          // Single thread = minimal memory usage
       '-c:v', 'libx264',
-      '-preset', 'veryfast',
-      '-crf', '25',
+      '-preset', 'ultrafast',   // Fastest preset = lowest memory footprint
+      '-crf', '26',
       '-c:a', 'aac',
-      '-b:a', '192k',
+      '-b:a', '128k',           // 128k is fine for YouTube re-encoding
       '-pix_fmt', 'yuv420p',
       '-shortest',
       '-movflags', '+faststart',
@@ -451,10 +452,11 @@ export async function renderVideo(options: FFmpegRenderOptions): Promise<FFmpegR
 
       let stderr = '';
       let lastProgressLog = 0;
+      const MAX_STDERR = 10000; // Cap stderr to prevent memory bloat
 
       proc.stderr?.on('data', (chunk: Buffer) => {
         const text = chunk.toString();
-        stderr += text;
+        if (stderr.length < MAX_STDERR) stderr += text.slice(0, MAX_STDERR - stderr.length);
 
         // Log progress every 15 seconds
         const now = Date.now();
