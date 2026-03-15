@@ -131,6 +131,10 @@ export default function NeuralBeatPage() {
 
           try {
             const data: PipelineStatus = JSON.parse(dataLine.slice(6));
+
+            // Skip heartbeat keep-alive messages
+            if ((data as any).type === 'heartbeat') continue;
+
             lastStatus = data;
 
             setProcessingIds((prev) => new Map(prev).set(recordId, data.id || recordId));

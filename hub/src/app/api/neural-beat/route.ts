@@ -146,14 +146,16 @@ export async function POST(request: NextRequest) {
           }
         };
 
-        // Keep-alive heartbeat: send SSE comment every 15s to prevent idle timeout
+        // Keep-alive heartbeat: send actual data events every 10s to prevent
+        // Vercel CDN/proxy from closing idle connections. Using real data: events
+        // (not SSE comments) because CDN may buffer/ignore comment-only frames.
         const heartbeat = setInterval(() => {
           try {
-            controller.enqueue(encoder.encode(`: heartbeat\n\n`));
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'heartbeat' })}\n\n`));
           } catch {
             clearInterval(heartbeat);
           }
-        }, 15000);
+        }, 10000);
 
         // Send initial status
         send({ id: pipelineId, recordId, status: 'running', steps: [] });
