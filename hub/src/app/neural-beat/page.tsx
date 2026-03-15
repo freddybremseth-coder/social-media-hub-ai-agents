@@ -58,7 +58,7 @@ export default function NeuralBeatPage() {
   const [processingAll, setProcessingAll] = useState(false);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
-  const pollIntervals = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  const abortControllers = useRef<Map<string, AbortController>>(new Map());
 
   const fetchSongs = useCallback(() => {
     fetch('/api/neural-beat')
@@ -70,70 +70,12 @@ export default function NeuralBeatPage() {
 
   useEffect(() => { fetchSongs(); }, [fetchSongs]);
 
-  // Cleanup poll intervals on unmount
+  // Cleanup abort controllers on unmount
   useEffect(() => {
     return () => {
-      pollIntervals.current.forEach((interval) => clearInterval(interval));
+      abortControllers.current.forEach((ctrl) => ctrl.abort());
     };
   }, []);
-
-  const pollPipelineStatus = useCallback((pipelineId: string, recordId: string) => {
-    // Poll every 3 seconds
-    const interval = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/neural-beat?statusId=${pipelineId}`);
-
-        // If pipeline not found (404), stop polling — server likely restarted
-        if (res.status === 404) {
-          clearInterval(interval);
-          pollIntervals.current.delete(pipelineId);
-          setProcessingIds((prev) => {
-            const next = new Map(prev);
-            next.delete(recordId);
-            return next;
-          });
-          setPipelineStatuses((prev) => ({
-            ...prev,
-            [recordId]: {
-              id: pipelineId,
-              recordId,
-              status: 'failed',
-              steps: [],
-              output: null,
-              error: 'Pipeline lost — server restarted. Please try again.',
-              startedAt: new Date().toISOString(),
-              completedAt: new Date().toISOString(),
-            },
-          }));
-          return;
-        }
-
-        if (!res.ok) return;
-        const data: PipelineStatus = await res.json();
-
-        setPipelineStatuses((prev) => ({ ...prev, [recordId]: data }));
-
-        // Stop polling when done
-        if (data.status === 'completed' || data.status === 'failed') {
-          clearInterval(interval);
-          pollIntervals.current.delete(pipelineId);
-          setProcessingIds((prev) => {
-            const next = new Map(prev);
-            next.delete(recordId);
-            return next;
-          });
-          // Refresh songs after completion
-          if (data.status === 'completed') {
-            setTimeout(fetchSongs, 2000);
-          }
-        }
-      } catch {
-        // ignore transient poll errors (network blips)
-      }
-    }, 3000);
-
-    pollIntervals.current.set(pipelineId, interval);
-  }, [fetchSongs]);
 
   const handleProcess = async (recordId: string) => {
     // Mark as processing
@@ -144,24 +86,21 @@ export default function NeuralBeatPage() {
       return next;
     });
 
+    const controller = new AbortController();
+    abortControllers.current.set(recordId, controller);
+
     try {
+      // ─── SSE Streaming: POST keeps connection open, streams progress ───
       const res = await fetch('/api/neural-beat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ recordId }),
+        signal: controller.signal,
       });
-      const data = await res.json();
 
-      if (res.ok && data.id) {
-        // Store the pipeline ID and start polling
-        setProcessingIds((prev) => new Map(prev).set(recordId, data.id));
-        setPipelineStatuses((prev) => ({
-          ...prev,
-          [recordId]: { id: data.id, recordId, status: 'running', steps: [] },
-        }));
-        pollPipelineStatus(data.id, recordId);
-      } else {
-        // Immediate error
+      // Non-streaming error response (validation errors return JSON)
+      if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({ error: 'Unknown error' }));
         setPipelineStatuses((prev) => ({
           ...prev,
           [recordId]: {
@@ -174,13 +113,64 @@ export default function NeuralBeatPage() {
           next.delete(recordId);
           return next;
         });
+        return;
       }
+
+      // Read SSE stream
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Process complete SSE messages (delimited by double newline)
+        const messages = buffer.split('\n\n');
+        buffer = messages.pop() || ''; // Keep incomplete message in buffer
+
+        for (const msg of messages) {
+          const dataLine = msg.split('\n').find((l) => l.startsWith('data: '));
+          if (!dataLine) continue;
+
+          try {
+            const data: PipelineStatus = JSON.parse(dataLine.slice(6));
+
+            setProcessingIds((prev) => new Map(prev).set(recordId, data.id || recordId));
+            setPipelineStatuses((prev) => ({ ...prev, [recordId]: data }));
+
+            // When pipeline finishes, clean up
+            if (data.status === 'completed' || data.status === 'failed') {
+              setProcessingIds((prev) => {
+                const next = new Map(prev);
+                next.delete(recordId);
+                return next;
+              });
+              if (data.status === 'completed') {
+                setTimeout(fetchSongs, 2000);
+              }
+            }
+          } catch {
+            // Skip malformed messages
+          }
+        }
+      }
+
+      // Stream ended — ensure processing state is cleaned up
+      setProcessingIds((prev) => {
+        const next = new Map(prev);
+        next.delete(recordId);
+        return next;
+      });
     } catch (err) {
+      if ((err as Error)?.name === 'AbortError') return; // User navigated away
       setPipelineStatuses((prev) => ({
         ...prev,
         [recordId]: {
           id: '', recordId, status: 'failed', steps: [],
-          error: 'Network error starting pipeline',
+          error: 'Connection lost during pipeline execution',
         },
       }));
       setProcessingIds((prev) => {
@@ -188,6 +178,8 @@ export default function NeuralBeatPage() {
         next.delete(recordId);
         return next;
       });
+    } finally {
+      abortControllers.current.delete(recordId);
     }
   };
 

@@ -58,6 +58,9 @@ export class NeuralBeatPipeline {
   /** The live PipelineRun, mutated in place so callers can poll progress. */
   public currentRun: PipelineRun | null = null;
 
+  /** Called after each step update — used by SSE streaming to push progress to client. */
+  public onProgress?: (run: PipelineRun) => void;
+
   async execute(songRecord: AirtableSongRecord): Promise<PipelineRun> {
     // Pre-check: verify FFmpeg is available before starting the pipeline
     const ffmpegOk = await isFFmpegAvailable();
@@ -87,6 +90,15 @@ export class NeuralBeatPipeline {
     // Expose the run object so callers can poll for real-time step progress
     this.currentRun = pipelineRun;
 
+    // Notify callback after each state change (used by SSE streaming)
+    const notify = () => this.onProgress?.(pipelineRun);
+
+    // Wrap mark functions to auto-notify on each state change
+    const stepRunning = (s: PipelineStep) => { markStepRunning(s); notify(); };
+    const stepCompleted = (s: PipelineStep) => { markStepCompleted(s); notify(); };
+    const stepFailed = (s: PipelineStep, err: string) => { markStepFailed(s, err); notify(); };
+    const stepSkipped = (s: PipelineStep) => { markStepSkipped(s); notify(); };
+
     let currentStepIndex = 0;
     let audioUrl: string | null = null;
     let songAnalysis: Awaited<ReturnType<typeof analyzeSong>> | null = null;
@@ -102,10 +114,10 @@ export class NeuralBeatPipeline {
       // Step 1: Update Airtable status to "Processing"
       // Graceful: if this fails (e.g. no Status column), log a warning and continue
       currentStepIndex = 0;
-      markStepRunning(steps[currentStepIndex]);
+      stepRunning(steps[currentStepIndex]);
       try {
         await updateSongStatus(songRecord.id, 'Processing');
-        markStepCompleted(steps[currentStepIndex]);
+        stepCompleted(steps[currentStepIndex]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         console.warn(
@@ -113,13 +125,13 @@ export class NeuralBeatPipeline {
           message
         );
         // Mark as completed with a note rather than crashing the pipeline
-        markStepCompleted(steps[currentStepIndex]);
+        stepCompleted(steps[currentStepIndex]);
         steps[currentStepIndex].result = `Skipped status update: ${message}`;
       }
 
       // Step 2: Download audio file
       currentStepIndex = 1;
-      markStepRunning(steps[currentStepIndex]);
+      stepRunning(steps[currentStepIndex]);
       try {
         audioUrl = songRecord.audioUrl || null;
         if (!audioUrl) {
@@ -130,16 +142,16 @@ export class NeuralBeatPipeline {
         if (!response.ok) {
           throw new Error(`Audio file not accessible: HTTP ${response.status}`);
         }
-        markStepCompleted(steps[currentStepIndex]);
+        stepCompleted(steps[currentStepIndex]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        markStepFailed(steps[currentStepIndex], message);
+        stepFailed(steps[currentStepIndex], message);
         throw new Error(`Step 2 failed: ${message}`);
       }
 
       // Step 3: Claude analyzes title/metadata -> genre, style, mood
       currentStepIndex = 2;
-      markStepRunning(steps[currentStepIndex]);
+      stepRunning(steps[currentStepIndex]);
       try {
         songAnalysis = await analyzeSong({
           title: songRecord.title,
@@ -147,16 +159,16 @@ export class NeuralBeatPipeline {
           audioUrl: audioUrl!,
           metadata: songRecord.metadata || undefined,
         });
-        markStepCompleted(steps[currentStepIndex]);
+        stepCompleted(steps[currentStepIndex]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        markStepFailed(steps[currentStepIndex], message);
+        stepFailed(steps[currentStepIndex], message);
         throw new Error(`Step 3 failed: ${message}`);
       }
 
       // Step 4: Gemini generates YouTube SEO metadata
       currentStepIndex = 3;
-      markStepRunning(steps[currentStepIndex]);
+      stepRunning(steps[currentStepIndex]);
       try {
         youtubeMetadata = await generateYouTubeSEO({
           title: songRecord.title,
@@ -165,16 +177,16 @@ export class NeuralBeatPipeline {
           style: songAnalysis!.style,
           mood: songAnalysis!.mood,
         });
-        markStepCompleted(steps[currentStepIndex]);
+        stepCompleted(steps[currentStepIndex]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        markStepFailed(steps[currentStepIndex], message);
+        stepFailed(steps[currentStepIndex], message);
         throw new Error(`Step 4 failed: ${message}`);
       }
 
       // Step 5: Gemini generates cover images — saved locally for FFmpeg
       currentStepIndex = 4;
-      markStepRunning(steps[currentStepIndex]);
+      stepRunning(steps[currentStepIndex]);
       try {
         console.log('[NeuralBeatPipeline] Starting image generation with Gemini...');
         const imageSetResult = await generateMusicImageSet({
@@ -215,16 +227,16 @@ export class NeuralBeatPipeline {
         }
 
         console.log(`[NeuralBeatPipeline] All ${localImagePaths.length} images saved locally`);
-        markStepCompleted(steps[currentStepIndex]);
+        stepCompleted(steps[currentStepIndex]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        markStepFailed(steps[currentStepIndex], message);
+        stepFailed(steps[currentStepIndex], message);
         throw new Error(`Step 5 failed: ${message}`);
       }
 
       // Step 6: FFmpeg renders multi-scene slideshow video (local, $0 cost)
       currentStepIndex = 5;
-      markStepRunning(steps[currentStepIndex]);
+      stepRunning(steps[currentStepIndex]);
       try {
         console.log('[NeuralBeatPipeline] Starting FFmpeg render (local, zero cost)...');
         const renderResult = await renderVideo({
@@ -236,16 +248,16 @@ export class NeuralBeatPipeline {
         videoRenderPath = renderResult.videoPath;
         videoBuffer = renderResult.videoBuffer;
         console.log(`[NeuralBeatPipeline] Video rendered: ${(renderResult.videoBuffer.length / 1024 / 1024).toFixed(1)} MB`);
-        markStepCompleted(steps[currentStepIndex]);
+        stepCompleted(steps[currentStepIndex]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        markStepFailed(steps[currentStepIndex], message);
+        stepFailed(steps[currentStepIndex], message);
         throw new Error(`Step 6 failed: ${message}`);
       }
 
       // Step 7: Upload video buffer directly to YouTube (no intermediate download)
       currentStepIndex = 6;
-      markStepRunning(steps[currentStepIndex]);
+      stepRunning(steps[currentStepIndex]);
       try {
         const uploadResult = await uploadVideo(videoBuffer!, {
           title: youtubeMetadata!.title,
@@ -266,16 +278,16 @@ export class NeuralBeatPipeline {
           }
         }
 
-        markStepCompleted(steps[currentStepIndex]);
+        stepCompleted(steps[currentStepIndex]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        markStepFailed(steps[currentStepIndex], message);
+        stepFailed(steps[currentStepIndex], message);
         throw new Error(`Step 7 failed: ${message}`);
       }
 
       // Step 8: Update Airtable with YouTube URL, AI Metadata, and Generated Image
       currentStepIndex = 7;
-      markStepRunning(steps[currentStepIndex]);
+      stepRunning(steps[currentStepIndex]);
       try {
         await updateSongFields(songRecord.id, {
           youtubeUrl: youtubeUrl!,
@@ -292,10 +304,10 @@ export class NeuralBeatPipeline {
           },
           ...(airtableImageUrl ? { imageUrl: airtableImageUrl } : {}),
         });
-        markStepCompleted(steps[currentStepIndex]);
+        stepCompleted(steps[currentStepIndex]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        markStepFailed(steps[currentStepIndex], message);
+        stepFailed(steps[currentStepIndex], message);
         throw new Error(`Step 8 failed: ${message}`);
       }
 
@@ -309,17 +321,19 @@ export class NeuralBeatPipeline {
         localImagePaths,
         airtableImageUrl,
       };
+      notify();
     } catch (error) {
       // Mark all remaining pending steps as skipped
       for (let i = currentStepIndex + 1; i < steps.length; i++) {
         if (steps[i].status === 'pending') {
-          markStepSkipped(steps[i]);
+          stepSkipped(steps[i]);
         }
       }
 
       pipelineRun.status = 'failed';
       pipelineRun.completedAt = new Date().toISOString();
       pipelineRun.error = error instanceof Error ? error.message : String(error);
+      notify();
 
       // Try to write error info to Airtable AI Metadata field (graceful)
       try {

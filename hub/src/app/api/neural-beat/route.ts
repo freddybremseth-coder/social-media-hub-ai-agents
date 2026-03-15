@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { waitUntil } from '@vercel/functions';
 import {
   getSongs,
   getSongsWithoutYouTube,
@@ -62,49 +61,8 @@ function mapRawRecordToSong(record: { id: string; fields: Record<string, any> })
   };
 }
 
-// ─── In-memory pipeline tracking ────────────────────────────────────
-// Stores running/completed pipeline results so the frontend can poll.
-// waitUntil() keeps the serverless function alive during pipeline execution,
-// ensuring this Map stays available for GET polling requests.
-const activePipelines = new Map<string, {
-  recordId: string;
-  pipeline: NeuralBeatPipeline;
-  startedAt: string;
-}>();
-
-// Clean up old entries after 30 minutes
-function cleanupOldPipelines() {
-  const thirtyMinAgo = Date.now() - 30 * 60 * 1000;
-  activePipelines.forEach((val, key) => {
-    if (new Date(val.startedAt).getTime() < thirtyMinAgo && val.pipeline.currentRun?.status !== 'running') {
-      activePipelines.delete(key);
-    }
-  });
-}
-
 export async function GET(request: NextRequest) {
-  const statusId = request.nextUrl.searchParams.get('statusId');
-
-  // If statusId provided, return pipeline status
-  if (statusId) {
-    const pipeline = activePipelines.get(statusId);
-    if (!pipeline) {
-      return NextResponse.json({ error: 'Pipeline not found' }, { status: 404 });
-    }
-    const run = pipeline.pipeline.currentRun;
-    return NextResponse.json({
-      id: statusId,
-      recordId: pipeline.recordId,
-      status: run?.status || 'running',
-      steps: run?.steps || [],
-      output: run?.output || null,
-      error: run?.error || null,
-      startedAt: pipeline.startedAt,
-      completedAt: run?.completedAt || null,
-    });
-  }
-
-  // Default: list all songs
+  // List all songs (pipeline status is now streamed via POST SSE)
   try {
     if (isConfigured()) {
       const songs = await getSongs();
@@ -172,50 +130,75 @@ export async function POST(request: NextRequest) {
     const rawRecord = await getRecord(songsTable, recordId);
     const songRecord = mapRawRecordToSong(rawRecord);
 
-    // Generate a pipeline ID
     const pipelineId = `${Date.now()}_${recordId}`;
 
-    // Create and register the pipeline instance
-    const pipeline = new NeuralBeatPipeline();
-    activePipelines.set(pipelineId, {
-      recordId,
-      pipeline,
-      startedAt: new Date().toISOString(),
-    });
+    // ─── SSE Streaming Response ──────────────────────────────────────
+    // Instead of returning a 202 and polling, we keep the connection open
+    // and stream pipeline progress as Server-Sent Events. This avoids the
+    // serverless state-sharing problem where GET requests hit a different
+    // Lambda instance than the POST that started the pipeline.
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      async start(controller) {
+        const send = (data: Record<string, unknown>) => {
+          try {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+          } catch {
+            // Stream might be closed by client
+          }
+        };
 
-    // ─── Execute pipeline with waitUntil ──────────────────────────────
-    // waitUntil() tells Vercel to keep the serverless function alive
-    // even after the HTTP response is sent. This prevents the pipeline
-    // from being killed mid-execution on serverless platforms.
-    //
-    // On non-Vercel environments, waitUntil is a no-op graceful fallback.
-    const pipelinePromise = pipeline.execute(songRecord).then((pipelineRun) => {
-      console.log(`[NeuralBeat] Pipeline ${pipelineId} finished: ${pipelineRun.status}`);
-    }).catch((err) => {
-      console.error(`[NeuralBeat] Pipeline ${pipelineId} crashed:`, err);
-    });
+        // Send initial status
+        send({ id: pipelineId, recordId, status: 'running', steps: [] });
 
-    // Keep the serverless function alive until the pipeline completes
-    try {
-      waitUntil(pipelinePromise);
-    } catch {
-      // waitUntil not available (local dev / non-Vercel) — pipeline runs as fire-and-forget
-      console.log('[NeuralBeat] waitUntil not available, running as fire-and-forget');
-    }
+        // Create pipeline with progress streaming
+        const pipeline = new NeuralBeatPipeline();
+        pipeline.onProgress = (run) => {
+          send({
+            id: pipelineId,
+            recordId,
+            status: run.status,
+            steps: run.steps,
+            output: run.output,
+            error: run.error,
+            startedAt: run.startedAt,
+            completedAt: run.completedAt,
+          });
+        };
 
-    // Clean up old entries periodically
-    cleanupOldPipelines();
+        try {
+          const pipelineRun = await pipeline.execute(songRecord);
+          // Send final state
+          send({
+            id: pipelineId,
+            recordId,
+            status: pipelineRun.status,
+            steps: pipelineRun.steps,
+            output: pipelineRun.output,
+            error: pipelineRun.error,
+            startedAt: pipelineRun.startedAt,
+            completedAt: pipelineRun.completedAt,
+          });
+        } catch (err) {
+          send({
+            id: pipelineId,
+            recordId,
+            status: 'failed',
+            error: err instanceof Error ? err.message : 'Pipeline crashed',
+          });
+        }
 
-    // Return immediately with the pipeline ID for polling
-    return NextResponse.json(
-      {
-        id: pipelineId,
-        recordId,
-        status: 'running',
-        message: 'Pipeline started. Poll GET /api/neural-beat?statusId=' + pipelineId + ' for updates.',
+        controller.close();
       },
-      { status: 202 }
-    );
+    });
+
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      },
+    });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Failed to trigger Neural Beat processing' },
