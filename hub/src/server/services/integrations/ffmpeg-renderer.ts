@@ -429,8 +429,8 @@ export async function renderVideo(options: FFmpegRenderOptions): Promise<FFmpegR
     // Encoding
     args.push(
       '-c:v', 'libx264',
-      '-preset', 'medium',
-      '-crf', '23',
+      '-preset', 'veryfast',
+      '-crf', '25',
       '-c:a', 'aac',
       '-b:a', '192k',
       '-pix_fmt', 'yuv420p',

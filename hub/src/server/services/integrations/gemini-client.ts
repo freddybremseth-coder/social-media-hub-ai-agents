@@ -324,9 +324,9 @@ export async function generateMusicImageSet(
     const batchElapsed = ((Date.now() - batchStartTime) / 1000).toFixed(1);
     console.log(`[Gemini] Batch ${batchNum} done: ${succeeded.length}/${batch.length} succeeded (${batchElapsed}s). Total: ${results.length}/${count}`);
 
-    // Delay between batches to avoid rate limits (3 seconds)
+    // Delay between batches to avoid rate limits (1.5 seconds)
     if (i + batchSize < enhancedPrompts.length) {
-      await new Promise((resolve) => setTimeout(resolve, 3000));
+      await new Promise((resolve) => setTimeout(resolve, 1500));
     }
   }
 
