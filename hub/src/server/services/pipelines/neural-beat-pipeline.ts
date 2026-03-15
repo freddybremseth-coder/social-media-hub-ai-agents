@@ -1,6 +1,6 @@
 import { updateSongStatus, updateSongFields } from '@/server/services/integrations/airtable-client';
 import { analyzeSong, generateMusicCoverImage, generateYouTubeSEO } from '@/server/services/integrations/gemini-client';
-import { renderAndWait } from '@/server/services/integrations/creatomate-client';
+import { renderAndWait, uploadImageToTempHost } from '@/server/services/integrations/creatomate-client';
 import { uploadVideoFromUrl } from '@/server/services/integrations/youtube-client';
 import {
   AirtableSongRecord,
@@ -74,6 +74,7 @@ export class NeuralBeatPipeline {
     let songAnalysis: Awaited<ReturnType<typeof analyzeSong>> | null = null;
     let youtubeMetadata: Awaited<ReturnType<typeof generateYouTubeSEO>> | null = null;
     let imageUrl: string | null = null;
+    let imageBase64: string | null = null;
     let videoRenderUrl: string | null = null;
     let youtubeUrl: string | null = null;
 
@@ -100,7 +101,7 @@ export class NeuralBeatPipeline {
       currentStepIndex = 1;
       markStepRunning(steps[currentStepIndex]);
       try {
-        audioUrl = songRecord.audioUrl;
+        audioUrl = songRecord.audioUrl || null;
         if (!audioUrl) {
           throw new Error('No audio URL found in song record');
         }
@@ -163,7 +164,15 @@ export class NeuralBeatPipeline {
           mood: songAnalysis!.mood,
           imagePrompt: youtubeMetadata!.imagePrompt,
         });
-        imageUrl = imageResult.imageUrl;
+        imageBase64 = imageResult.base64;
+
+        // Upload image to temp host for use in Creatomate and Airtable
+        // (both need a real URL, not a data URI)
+        const hostedUrl = await uploadImageToTempHost(
+          imageResult.base64,
+          imageResult.mimeType
+        );
+        imageUrl = hostedUrl;
         markStepCompleted(steps[currentStepIndex]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -176,9 +185,8 @@ export class NeuralBeatPipeline {
       markStepRunning(steps[currentStepIndex]);
       try {
         const renderResult = await renderAndWait({
-          templateId: process.env.CREATOMATE_TEMPLATE_ID || 'f87fa856-4169-4ce8-8204-e066eabd1c60',
           audioUrl: audioUrl!,
-          imageUrl: imageUrl!,
+          imageUrl: imageUrl || undefined,
           title: songRecord.title,
           subtitle: songRecord.artist,
         });
@@ -239,7 +247,7 @@ export class NeuralBeatPipeline {
             genre: songAnalysis!.genre,
             style: songAnalysis!.style,
             mood: songAnalysis!.mood,
-            bpm: songAnalysis!.bpm,
+            bpm: (songAnalysis as any)?.bpm,
             youtubeTitle: youtubeMetadata!.title,
             youtubeDescription: youtubeMetadata!.description,
             tags: youtubeMetadata!.tags,
