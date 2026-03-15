@@ -153,16 +153,35 @@ export interface FFmpegRenderResult {
  * then parses the "Duration: HH:MM:SS.cs" line.
  */
 async function getAudioDuration(audioPath: string): Promise<number> {
-  // ffmpeg -i <file> exits with code 1 (no output specified), but stderr has the info
+  // ffmpeg -i <file> prints duration info to stderr regardless of exit code.
+  // With "-f null -" it may exit 0 (success) or 1 — we capture stderr in both cases.
   let stderr = '';
   try {
-    await execFileAsync(getFFmpegPath(), ['-i', audioPath, '-hide_banner', '-f', 'null', '-']);
+    const result = await execFileAsync(getFFmpegPath(), ['-i', audioPath, '-hide_banner', '-f', 'null', '-']);
+    stderr = result.stderr || '';
   } catch (err: any) {
     stderr = err.stderr || '';
   }
 
   // Parse "Duration: 00:03:30.12" from stderr
-  const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/);
+  let match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/);
+  if (match) {
+    const hours = parseInt(match[1]);
+    const minutes = parseInt(match[2]);
+    const seconds = parseInt(match[3]);
+    const centiseconds = parseInt(match[4]);
+    return hours * 3600 + minutes * 60 + seconds + centiseconds / 100;
+  }
+
+  // Fallback: try with just -i (no output) which always exits 1 with info in stderr
+  console.warn('[FFmpeg] First duration attempt got empty stderr, trying fallback -i only...');
+  try {
+    await execFileAsync(getFFmpegPath(), ['-i', audioPath, '-hide_banner']);
+  } catch (err: any) {
+    stderr = err.stderr || '';
+  }
+
+  match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/);
   if (match) {
     const hours = parseInt(match[1]);
     const minutes = parseInt(match[2]);
