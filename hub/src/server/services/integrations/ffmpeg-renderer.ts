@@ -23,14 +23,16 @@ import * as os from 'os';
 
 const execFileAsync = promisify(execFile);
 
-// ─── FFmpeg/FFprobe binary resolution ───────────────────────
+// ─── FFmpeg binary resolution ────────────────────────────────
 // Uses the vercel-labs/ffmpeg-on-vercel approach:
 // 1. Try process.cwd() + hardcoded relative path (works on Vercel serverless)
 // 2. Try require() resolution (works in local dev)
 // 3. Fall back to system PATH
 //
-// On Vercel, require('ffmpeg-static') uses __dirname which gets mangled by
-// Next.js webpack bundling. Using process.cwd() + relative path avoids this.
+// NOTE: We only need ffmpeg (not ffprobe). Audio duration is extracted
+// using `ffmpeg -i` which outputs format info to stderr. This avoids
+// the ffprobe-static package whose multi-platform binary structure
+// doesn't deploy reliably on Vercel serverless.
 
 function resolveFFmpegPath(): string {
   // Priority 1: Environment variable override
@@ -42,51 +44,26 @@ function resolveFFmpegPath(): string {
     fsSync.accessSync(cwdPath);
     // Ensure binary is executable (may lose permissions during deployment)
     try { fsSync.chmodSync(cwdPath, 0o755); } catch {}
+    console.log(`[FFmpeg] Using bundled binary (cwd): ${cwdPath}`);
     return cwdPath;
   } catch {}
 
   // Priority 3: require() resolution (local development)
   try {
     const resolved = require('ffmpeg-static');
-    if (resolved && typeof resolved === 'string') return resolved;
+    if (resolved && typeof resolved === 'string') {
+      console.log(`[FFmpeg] Using bundled binary (require): ${resolved}`);
+      return resolved;
+    }
   } catch {}
 
   // Fallback: system PATH
+  console.log('[FFmpeg] Using system ffmpeg from PATH');
   return 'ffmpeg';
-}
-
-function resolveFFprobePath(): string {
-  // Priority 1: Environment variable override
-  if (process.env.FFPROBE_PATH) return process.env.FFPROBE_PATH;
-
-  // Priority 2: Bundled binary via process.cwd() (Vercel approach)
-  // ffprobe-static stores binaries in bin/<platform>/<arch>/ffprobe
-  const platform = os.platform();
-  const arch = os.arch();
-  const cwdPath = path.join(
-    process.cwd(), 'node_modules', 'ffprobe-static', 'bin',
-    platform, arch, platform === 'win32' ? 'ffprobe.exe' : 'ffprobe',
-  );
-  try {
-    fsSync.accessSync(cwdPath);
-    try { fsSync.chmodSync(cwdPath, 0o755); } catch {}
-    return cwdPath;
-  } catch {}
-
-  // Priority 3: require() resolution (local development)
-  try {
-    const resolved = require('ffprobe-static');
-    if (resolved?.path && typeof resolved.path === 'string') return resolved.path;
-  } catch {}
-
-  // Fallback: system PATH
-  return 'ffprobe';
 }
 
 // Resolve once at module load time
 const FFMPEG_PATH = resolveFFmpegPath();
-const FFPROBE_PATH = resolveFFprobePath();
-console.log(`[FFmpeg] Binary paths — ffmpeg: ${FFMPEG_PATH}, ffprobe: ${FFPROBE_PATH}`);
 
 // ─── Constants ──────────────────────────────────────────────
 
@@ -127,7 +104,7 @@ export interface FFmpegRenderOptions {
   title?: string;
   /** Artist name / subtitle */
   subtitle?: string;
-  /** Known audio duration in seconds (skips ffprobe if provided) */
+  /** Known audio duration in seconds (skips duration detection if provided) */
   duration?: number;
 }
 
@@ -143,20 +120,30 @@ export interface FFmpegRenderResult {
 // ─── Utilities ──────────────────────────────────────────────
 
 /**
- * Get audio duration using ffprobe.
+ * Get audio duration using ffmpeg (no ffprobe needed).
+ * Runs `ffmpeg -i <file>` which outputs format info to stderr,
+ * then parses the "Duration: HH:MM:SS.cs" line.
  */
 async function getAudioDuration(audioPath: string): Promise<number> {
-  const { stdout } = await execFileAsync(FFPROBE_PATH, [
-    '-v', 'quiet',
-    '-show_entries', 'format=duration',
-    '-of', 'csv=p=0',
-    audioPath,
-  ]);
-  const duration = parseFloat(stdout.trim());
-  if (isNaN(duration) || duration <= 0) {
-    throw new Error(`Could not determine audio duration from ${audioPath}`);
+  // ffmpeg -i <file> exits with code 1 (no output specified), but stderr has the info
+  let stderr = '';
+  try {
+    await execFileAsync(FFMPEG_PATH, ['-i', audioPath, '-hide_banner', '-f', 'null', '-']);
+  } catch (err: any) {
+    stderr = err.stderr || '';
   }
-  return duration;
+
+  // Parse "Duration: 00:03:30.12" from stderr
+  const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/);
+  if (match) {
+    const hours = parseInt(match[1]);
+    const minutes = parseInt(match[2]);
+    const seconds = parseInt(match[3]);
+    const centiseconds = parseInt(match[4]);
+    return hours * 3600 + minutes * 60 + seconds + centiseconds / 100;
+  }
+
+  throw new Error(`Could not determine audio duration from ${audioPath} (ffmpeg stderr: ${stderr.substring(0, 200)})`);
 }
 
 /**
@@ -496,16 +483,12 @@ export async function isAvailable(): Promise<boolean> {
     if (FFMPEG_PATH !== 'ffmpeg') {
       try { fsSync.chmodSync(FFMPEG_PATH, 0o755); } catch {}
     }
-    if (FFPROBE_PATH !== 'ffprobe') {
-      try { fsSync.chmodSync(FFPROBE_PATH, 0o755); } catch {}
-    }
-    await execFileAsync(FFMPEG_PATH, ['-version']);
-    await execFileAsync(FFPROBE_PATH, ['-version']);
+    const { stdout } = await execFileAsync(FFMPEG_PATH, ['-version']);
+    console.log(`[FFmpeg] Available: ${stdout.split('\n')[0]}`);
     return true;
   } catch (err) {
     console.error('[FFmpeg] isAvailable check failed:', err instanceof Error ? err.message : err);
     console.error('[FFmpeg] FFMPEG_PATH:', FFMPEG_PATH, 'exists:', fsSync.existsSync(FFMPEG_PATH));
-    console.error('[FFmpeg] FFPROBE_PATH:', FFPROBE_PATH, 'exists:', fsSync.existsSync(FFPROBE_PATH));
     return false;
   }
 }
