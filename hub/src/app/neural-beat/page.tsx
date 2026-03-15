@@ -41,13 +41,12 @@ type SongStatus = 'ready' | 'processing' | 'done' | 'error' | 'no-audio';
 const PIPELINE_STEPS = [
   { name: 'Update Airtable', desc: 'Mark as processing' },
   { name: 'Download Audio', desc: 'Fetch audio file from Airtable' },
-  { name: 'AI Song Analysis', desc: 'Gemini analyzes genre, mood, style' },
+  { name: 'AI Analysis', desc: 'Gemini analyzes genre, mood, style' },
   { name: 'YouTube SEO', desc: 'Gemini generates title, description, tags' },
-  { name: 'Cover Image', desc: 'Gemini generates album artwork' },
-  { name: 'Video Render', desc: 'Creatomate creates music video' },
-  { name: 'Render Complete', desc: 'Wait for video processing' },
+  { name: '6 Cover Images', desc: 'Gemini generates album artwork set' },
+  { name: 'FFmpeg Render', desc: 'Local video render with transitions' },
   { name: 'YouTube Upload', desc: 'Upload video with AI metadata' },
-  { name: 'Update Airtable', desc: 'Write back YouTube URL & metadata' },
+  { name: 'Save Results', desc: 'Write back YouTube URL & metadata' },
 ];
 
 export default function NeuralBeatPage() {
@@ -120,16 +119,11 @@ export default function NeuralBeatPage() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      let lastStatus: PipelineStatus | null = null;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        // Process complete SSE messages (delimited by double newline)
-        const messages = buffer.split('\n\n');
-        buffer = messages.pop() || ''; // Keep incomplete message in buffer
+      const processSSEMessages = (raw: string) => {
+        const messages = raw.split('\n\n');
+        const remainder = messages.pop() || '';
 
         for (const msg of messages) {
           const dataLine = msg.split('\n').find((l) => l.startsWith('data: '));
@@ -137,6 +131,7 @@ export default function NeuralBeatPage() {
 
           try {
             const data: PipelineStatus = JSON.parse(dataLine.slice(6));
+            lastStatus = data;
 
             setProcessingIds((prev) => new Map(prev).set(recordId, data.id || recordId));
             setPipelineStatuses((prev) => ({ ...prev, [recordId]: data }));
@@ -156,14 +151,42 @@ export default function NeuralBeatPage() {
             // Skip malformed messages
           }
         }
+
+        return remainder;
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        buffer = processSSEMessages(buffer);
       }
 
-      // Stream ended — ensure processing state is cleaned up
+      // Process any remaining data in buffer after stream closes
+      if (buffer.trim()) {
+        processSSEMessages(buffer + '\n\n');
+      }
+
+      // Stream ended — if we never got a final status, show an error
       setProcessingIds((prev) => {
         const next = new Map(prev);
         next.delete(recordId);
         return next;
       });
+
+      if (!lastStatus || lastStatus.status === 'running') {
+        // Stream ended without a completed/failed message — likely Vercel timeout
+        setPipelineStatuses((prev) => ({
+          ...prev,
+          [recordId]: {
+            id: lastStatus?.id || '',
+            recordId,
+            status: 'failed',
+            steps: lastStatus?.steps || [],
+            error: 'Pipeline connection lost — the server may have timed out. Check Vercel logs for details.',
+          },
+        }));
+      }
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') return; // User navigated away
       setPipelineStatuses((prev) => ({
@@ -235,12 +258,12 @@ export default function NeuralBeatPage() {
 
   const getStepProgress = (recordId: string): { completed: number; total: number; currentStep: string } => {
     const status = pipelineStatuses[recordId];
-    if (!status?.steps?.length) return { completed: 0, total: 9, currentStep: 'Starting...' };
+    if (!status?.steps?.length) return { completed: 0, total: 8, currentStep: 'Starting...' };
     const completed = status.steps.filter((s) => s.status === 'completed').length;
     const current = status.steps.find((s) => s.status === 'in_progress');
     return {
       completed,
-      total: status.steps.length || 9,
+      total: status.steps.length || 8,
       currentStep: current?.name || (completed === status.steps.length ? 'Complete!' : 'Starting...'),
     };
   };
@@ -514,7 +537,7 @@ export default function NeuralBeatPage() {
                       {/* Live pipeline step progress */}
                       {status === 'processing' && pipelineStatus?.steps && pipelineStatus.steps.length > 0 && (
                         <div className="mt-3 p-3 rounded-lg bg-blue-500/5 border border-blue-500/20">
-                          <div className="grid grid-cols-3 gap-1.5 md:grid-cols-9">
+                          <div className="grid grid-cols-4 gap-1.5 md:grid-cols-8">
                             {pipelineStatus.steps.map((step, i) => (
                               <div key={i} className="flex flex-col items-center gap-1">
                                 <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold ${
@@ -675,7 +698,7 @@ export default function NeuralBeatPage() {
         <TabsContent value="how-it-works">
           <Card className="bg-slate-800/50 border-slate-700/50">
             <CardHeader>
-              <CardTitle className="text-white">Neural Beat Pipeline &mdash; 9 Steps</CardTitle>
+              <CardTitle className="text-white">Neural Beat Pipeline &mdash; 8 Steps</CardTitle>
               <CardDescription>Full automated workflow from Airtable to YouTube</CardDescription>
             </CardHeader>
             <CardContent>
