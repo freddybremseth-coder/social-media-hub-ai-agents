@@ -89,6 +89,7 @@ export interface FFmpegRenderOptions {
   title?: string;
   subtitle?: string;
   duration?: number;
+  onSegmentProgress?: (current: number, total: number) => void;
 }
 
 export interface FFmpegRenderResult {
@@ -203,6 +204,7 @@ export async function renderVideo(options: FFmpegRenderOptions): Promise<FFmpegR
       segmentPaths.push(segPath);
 
       console.log(`[FFmpeg] Encoding segment ${i + 1}/${imageCount}...`);
+      options.onSegmentProgress?.(i + 1, imageCount);
 
       // Single image → short video clip (MPEG-TS for seamless concat)
       await runFFmpeg([

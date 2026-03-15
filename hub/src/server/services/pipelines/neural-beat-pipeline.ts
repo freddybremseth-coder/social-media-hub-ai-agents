@@ -251,6 +251,11 @@ export class NeuralBeatPipeline {
           imagePaths: localImagePaths,
           title: songRecord.title,
           subtitle: songRecord.artist,
+          onSegmentProgress: (current, total) => {
+            // Update step result with segment progress to keep SSE alive
+            steps[currentStepIndex].result = `Encoding segment ${current}/${total}`;
+            notify();
+          },
         });
         videoRenderPath = renderResult.videoPath;
         videoBuffer = renderResult.videoBuffer;

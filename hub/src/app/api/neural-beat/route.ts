@@ -133,10 +133,8 @@ export async function POST(request: NextRequest) {
     const pipelineId = `${Date.now()}_${recordId}`;
 
     // ─── SSE Streaming Response ──────────────────────────────────────
-    // Instead of returning a 202 and polling, we keep the connection open
-    // and stream pipeline progress as Server-Sent Events. This avoids the
-    // serverless state-sharing problem where GET requests hit a different
-    // Lambda instance than the POST that started the pipeline.
+    // Stream pipeline progress as Server-Sent Events with keep-alive
+    // heartbeats every 15s to prevent proxy/CDN timeout during long steps.
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
@@ -147,6 +145,15 @@ export async function POST(request: NextRequest) {
             // Stream might be closed by client
           }
         };
+
+        // Keep-alive heartbeat: send SSE comment every 15s to prevent idle timeout
+        const heartbeat = setInterval(() => {
+          try {
+            controller.enqueue(encoder.encode(`: heartbeat\n\n`));
+          } catch {
+            clearInterval(heartbeat);
+          }
+        }, 15000);
 
         // Send initial status
         send({ id: pipelineId, recordId, status: 'running', steps: [] });
@@ -188,6 +195,7 @@ export async function POST(request: NextRequest) {
           });
         }
 
+        clearInterval(heartbeat);
         controller.close();
       },
     });
