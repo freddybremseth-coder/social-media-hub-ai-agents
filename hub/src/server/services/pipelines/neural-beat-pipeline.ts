@@ -52,6 +52,9 @@ function markStepSkipped(step: PipelineStep): void {
 }
 
 export class NeuralBeatPipeline {
+  /** The live PipelineRun, mutated in place so callers can poll progress. */
+  public currentRun: PipelineRun | null = null;
+
   async execute(songRecord: AirtableSongRecord): Promise<PipelineRun> {
     const steps: PipelineStep[] = STEP_NAMES.map((name, index) =>
       createStep(name, index)
@@ -68,6 +71,9 @@ export class NeuralBeatPipeline {
       completedAt: null,
       error: null,
     };
+
+    // Expose the run object so callers can poll for real-time step progress
+    this.currentRun = pipelineRun;
 
     let currentStepIndex = 0;
     let audioUrl: string | null = null;

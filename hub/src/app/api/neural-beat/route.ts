@@ -5,7 +5,7 @@ import {
   getRecord,
 } from '@/server/services/integrations/airtable-client';
 import { NeuralBeatPipeline } from '@/server/services/pipelines/neural-beat-pipeline';
-import type { AirtableSongRecord } from '@/lib/types';
+import type { AirtableSongRecord, PipelineRun } from '@/lib/types';
 
 // Field mapping for the "Make.com Songs" Airtable table
 const SONG_FIELD_MAP = {
@@ -55,7 +55,47 @@ function mapRawRecordToSong(record: { id: string; fields: Record<string, any> })
   };
 }
 
-export async function GET() {
+// ─── In-memory pipeline tracking ────────────────────────────────────
+// Stores running/completed pipeline results so the frontend can poll.
+const activePipelines = new Map<string, {
+  recordId: string;
+  pipeline: NeuralBeatPipeline;
+  startedAt: string;
+}>();
+
+// Clean up old entries after 30 minutes
+function cleanupOldPipelines() {
+  const thirtyMinAgo = Date.now() - 30 * 60 * 1000;
+  activePipelines.forEach((val, key) => {
+    if (new Date(val.startedAt).getTime() < thirtyMinAgo && val.pipeline.currentRun?.status !== 'running') {
+      activePipelines.delete(key);
+    }
+  });
+}
+
+export async function GET(request: NextRequest) {
+  const statusId = request.nextUrl.searchParams.get('statusId');
+
+  // If statusId provided, return pipeline status
+  if (statusId) {
+    const pipeline = activePipelines.get(statusId);
+    if (!pipeline) {
+      return NextResponse.json({ error: 'Pipeline not found' }, { status: 404 });
+    }
+    const run = pipeline.pipeline.currentRun;
+    return NextResponse.json({
+      id: statusId,
+      recordId: pipeline.recordId,
+      status: run?.status || 'running',
+      steps: run?.steps || [],
+      output: run?.output || null,
+      error: run?.error || null,
+      startedAt: pipeline.startedAt,
+      completedAt: run?.completedAt || null,
+    });
+  }
+
+  // Default: list all songs
   try {
     if (isConfigured()) {
       const songs = await getSongs();
@@ -109,28 +149,38 @@ export async function POST(request: NextRequest) {
     const rawRecord = await getRecord(songsTable, recordId);
     const songRecord = mapRawRecordToSong(rawRecord);
 
-    // Execute the Neural Beat pipeline (runs async in background)
+    // Generate a pipeline ID
+    const pipelineId = `${Date.now()}_${recordId}`;
+
+    // Create and register the pipeline instance
     const pipeline = new NeuralBeatPipeline();
-    // Fire-and-forget: start the pipeline without blocking the response
-    const pipelinePromise = pipeline.execute(songRecord);
+    activePipelines.set(pipelineId, {
+      recordId,
+      pipeline,
+      startedAt: new Date().toISOString(),
+    });
 
-    // In development, await the pipeline so we can return the result.
-    // In production, you might want to return immediately and poll for status.
-    const pipelineRun = await pipelinePromise;
+    // Fire-and-forget: start the pipeline in the background
+    // pipeline.currentRun is updated in real-time during execution,
+    // so the GET polling endpoint can return live step progress.
+    pipeline.execute(songRecord).then((pipelineRun) => {
+      console.log(`[NeuralBeat] Pipeline ${pipelineId} finished: ${pipelineRun.status}`);
+    }).catch((err) => {
+      console.error(`[NeuralBeat] Pipeline ${pipelineId} crashed:`, err);
+    });
 
+    // Clean up old entries periodically
+    cleanupOldPipelines();
+
+    // Return immediately with the pipeline ID for polling
     return NextResponse.json(
       {
-        id: pipelineRun.id,
+        id: pipelineId,
         recordId,
-        pipelineType: 'neural-beat',
-        status: pipelineRun.status,
-        steps: pipelineRun.steps,
-        output: pipelineRun.output,
-        error: pipelineRun.error,
-        startedAt: pipelineRun.startedAt,
-        completedAt: pipelineRun.completedAt,
+        status: 'running',
+        message: 'Pipeline started. Poll GET /api/neural-beat?statusId=' + pipelineId + ' for updates.',
       },
-      { status: pipelineRun.status === 'failed' ? 500 : 201 }
+      { status: 202 }
     );
   } catch (error) {
     return NextResponse.json(
