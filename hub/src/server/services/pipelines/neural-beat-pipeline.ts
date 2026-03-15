@@ -1,4 +1,4 @@
-import { updateSongStatus } from '@/server/services/integrations/airtable-client';
+import { updateSongStatus, updateSongFields } from '@/server/services/integrations/airtable-client';
 import { analyzeSong, generateMusicCoverImage } from '@/server/services/integrations/gemini-client';
 import { renderAndWait } from '@/server/services/integrations/creatomate-client';
 import { uploadVideoFromUrl } from '@/server/services/integrations/youtube-client';
@@ -81,6 +81,7 @@ export class NeuralBeatPipeline {
 
     try {
       // Step 1: Update Airtable status to "Processing"
+      // Graceful: if this fails (e.g. no Status column), log a warning and continue
       currentStepIndex = 0;
       markStepRunning(steps[currentStepIndex]);
       try {
@@ -88,8 +89,13 @@ export class NeuralBeatPipeline {
         markStepCompleted(steps[currentStepIndex]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        markStepFailed(steps[currentStepIndex], message);
-        throw new Error(`Step 1 failed: ${message}`);
+        console.warn(
+          '[NeuralBeatPipeline] Step 1: Could not update Airtable status (non-fatal, continuing):',
+          message
+        );
+        // Mark as completed with a note rather than crashing the pipeline
+        markStepCompleted(steps[currentStepIndex]);
+        steps[currentStepIndex].result = `Skipped status update: ${message}`;
       }
 
       // Step 2: Download audio file
@@ -226,15 +232,27 @@ export class NeuralBeatPipeline {
         throw new Error(`Step 8 failed: ${message}`);
       }
 
-      // Step 9: Update Airtable with YouTube URL + status "Done"
+      // Step 9: Update Airtable with YouTube URL, AI Metadata, and Generated Image
+      // Uses updateSongFields which maps to the correct Airtable column names:
+      //   youtubeUrl  -> "YouTube URL"
+      //   aiMetadata  -> "AI Metadata" (JSON stringified)
+      //   imageUrl    -> "Generated Image" (attachment array)
       currentStepIndex = 8;
       markStepRunning(steps[currentStepIndex]);
       try {
-        await updateSongStatus(songRecord.id, 'Done', {
+        await updateSongFields(songRecord.id, {
           youtubeUrl: youtubeUrl!,
-          genre: songAnalysis!.genre,
-          style: songAnalysis!.style,
-          mood: songAnalysis!.mood,
+          aiMetadata: {
+            genre: songAnalysis!.genre,
+            style: songAnalysis!.style,
+            mood: songAnalysis!.mood,
+            bpm: songAnalysis!.bpm,
+            youtubeTitle: youtubeMetadata!.title,
+            youtubeDescription: youtubeMetadata!.description,
+            tags: youtubeMetadata!.tags,
+            processedAt: new Date().toISOString(),
+          },
+          ...(imageUrl ? { imageUrl } : {}),
         });
         markStepCompleted(steps[currentStepIndex]);
       } catch (error) {
@@ -265,14 +283,18 @@ export class NeuralBeatPipeline {
       pipelineRun.completedAt = new Date().toISOString();
       pipelineRun.error = error instanceof Error ? error.message : String(error);
 
-      // Update Airtable status to "Error"
+      // Try to write error info to Airtable AI Metadata field (graceful)
       try {
-        await updateSongStatus(songRecord.id, 'Error', {
-          error: pipelineRun.error,
+        await updateSongFields(songRecord.id, {
+          aiMetadata: {
+            error: pipelineRun.error,
+            failedAt: new Date().toISOString(),
+            lastStep: steps[currentStepIndex]?.name,
+          },
         });
       } catch (airtableError) {
         console.error(
-          '[NeuralBeatPipeline] Failed to update Airtable error status:',
+          '[NeuralBeatPipeline] Failed to update Airtable error metadata:',
           airtableError
         );
       }

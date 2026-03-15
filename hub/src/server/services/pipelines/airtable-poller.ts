@@ -1,5 +1,5 @@
 import {
-  pollForSongTriggers,
+  getSongsWithoutYouTube,
   pollForBrandVideoTriggers,
   isConfigured,
 } from '@/server/services/integrations/airtable-client';
@@ -49,8 +49,10 @@ export class AirtablePoller {
     }
 
     try {
+      // Songs: find records without a YouTube URL (ready for processing)
+      // Brand Videos: still uses Status-based polling
       const [songs, brandVideos] = await Promise.all([
-        pollForSongTriggers(),
+        getSongsWithoutYouTube(),
         pollForBrandVideoTriggers(),
       ]);
 

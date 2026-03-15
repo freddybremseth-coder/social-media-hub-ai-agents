@@ -89,22 +89,19 @@ export async function createRecord(
   return res.json();
 }
 
+// ---- Airtable "Make.com Songs" column name mapping ----
+// Maps internal field keys to actual Airtable column names in the "Make.com Songs" table.
+const SONG_FIELD_MAP = {
+  trackName: 'Track Name',
+  audioFile: 'Audio File',
+  youtubeUrl: 'YouTube URL',
+  aiMetadata: 'AI Metadata',
+  generatedImage: 'Generated Image',
+  lastModifiedTime: 'Last Modified Time',
+  created: 'Created',
+} as const;
+
 // ---- Song-specific helpers ----
-
-export async function pollForSongTriggers(): Promise<AirtableSongRecord[]> {
-  const { songsTable } = getConfig();
-  const records = await listRecords(songsTable, '{Status} = "Trigger"');
-  return records.map(mapToSongRecord);
-}
-
-export async function updateSongStatus(
-  recordId: string,
-  status: AirtableSongRecord['status'],
-  extraFields?: Record<string, any>
-): Promise<void> {
-  const { songsTable } = getConfig();
-  await updateRecord(songsTable, recordId, { Status: status, ...extraFields });
-}
 
 export async function getSongs(maxRecords?: number): Promise<AirtableSongRecord[]> {
   const { songsTable } = getConfig();
@@ -112,23 +109,119 @@ export async function getSongs(maxRecords?: number): Promise<AirtableSongRecord[
   return records.map(mapToSongRecord);
 }
 
+export async function getSongsWithoutYouTube(): Promise<AirtableSongRecord[]> {
+  const { songsTable } = getConfig();
+  const records = await listRecords(
+    songsTable,
+    `{${SONG_FIELD_MAP.youtubeUrl}} = ''`
+  );
+  return records.map(mapToSongRecord);
+}
+
+export async function updateSongStatus(
+  recordId: string,
+  _status: AirtableSongRecord['status'],
+  extraFields?: Record<string, any>
+): Promise<void> {
+  const { songsTable } = getConfig();
+  // The "Make.com Songs" table has no Status column.
+  // Translate any known internal keys to proper Airtable column names.
+  const airtableFields: Record<string, any> = {};
+  if (extraFields) {
+    for (const [key, value] of Object.entries(extraFields)) {
+      if (key === 'youtubeUrl') {
+        airtableFields[SONG_FIELD_MAP.youtubeUrl] = value;
+      } else if (key === 'metadata' || key === 'aiMetadata') {
+        airtableFields[SONG_FIELD_MAP.aiMetadata] =
+          typeof value === 'string' ? value : JSON.stringify(value);
+      } else if (key === 'imageUrl' || key === 'generatedImage') {
+        // Airtable attachment fields expect an array of { url } objects
+        airtableFields[SONG_FIELD_MAP.generatedImage] = [{ url: value }];
+      } else {
+        // Pass through any other fields as-is
+        airtableFields[key] = value;
+      }
+    }
+  }
+  if (Object.keys(airtableFields).length > 0) {
+    await updateRecord(songsTable, recordId, airtableFields);
+  }
+}
+
+/**
+ * Update arbitrary fields on a song record, translating internal keys
+ * to the correct Airtable column names for the "Make.com Songs" table.
+ */
+export async function updateSongFields(
+  recordId: string,
+  fields: Record<string, any>
+): Promise<void> {
+  const { songsTable } = getConfig();
+  const airtableFields: Record<string, any> = {};
+
+  for (const [key, value] of Object.entries(fields)) {
+    switch (key) {
+      case 'youtubeUrl':
+        airtableFields[SONG_FIELD_MAP.youtubeUrl] = value;
+        break;
+      case 'aiMetadata':
+      case 'metadata':
+        airtableFields[SONG_FIELD_MAP.aiMetadata] =
+          typeof value === 'string' ? value : JSON.stringify(value);
+        break;
+      case 'imageUrl':
+      case 'generatedImage':
+        // Airtable attachment fields expect an array of { url } objects
+        airtableFields[SONG_FIELD_MAP.generatedImage] = [{ url: value }];
+        break;
+      case 'title':
+      case 'trackName':
+        airtableFields[SONG_FIELD_MAP.trackName] = value;
+        break;
+      default:
+        // Pass unknown keys through as-is (in case user adds custom columns)
+        airtableFields[key] = value;
+        break;
+    }
+  }
+
+  if (Object.keys(airtableFields).length > 0) {
+    await updateRecord(songsTable, recordId, airtableFields);
+  }
+}
+
 function mapToSongRecord(record: AirtableRecord): AirtableSongRecord {
   const f = record.fields;
+
+  // Parse AI Metadata back from JSON string if present
+  let metadata: Record<string, any> | undefined;
+  const rawMeta = f[SONG_FIELD_MAP.aiMetadata];
+  if (rawMeta) {
+    if (typeof rawMeta === 'string') {
+      try {
+        metadata = JSON.parse(rawMeta);
+      } catch {
+        metadata = { raw: rawMeta };
+      }
+    } else {
+      metadata = rawMeta;
+    }
+  }
+
   return {
     id: record.id,
-    title: f.Title || f.Name || f.title || '',
-    artist: f.Artist || f.artist || 'Neural Beat',
-    audioUrl: extractAttachmentUrl(f.Audio || f.AudioFile || f['Audio File']),
-    status: f.Status || 'Trigger',
-    genre: f.Genre || f.genre,
-    mood: f.Mood || f.mood,
-    bpm: f.BPM || f.bpm,
-    imageUrl: extractAttachmentUrl(f.Image || f.CoverImage),
-    imagePrompt: f.ImagePrompt || f['Image Prompt'],
-    videoUrl: f.VideoUrl || f['Video URL'],
-    youtubeUrl: f.YouTubeUrl || f['YouTube URL'],
-    youtubeVideoId: f.YouTubeVideoId || f['YouTube Video ID'],
-    errorMessage: f.ErrorMessage || f.Error,
+    title: f[SONG_FIELD_MAP.trackName] || '',
+    artist: 'Neural Beat',
+    audioUrl: extractAttachmentUrl(f[SONG_FIELD_MAP.audioFile]),
+    status: undefined, // No Status column in this table
+    genre: metadata?.genre,
+    mood: metadata?.mood,
+    bpm: metadata?.bpm,
+    imageUrl: extractAttachmentUrl(f[SONG_FIELD_MAP.generatedImage]),
+    youtubeUrl: f[SONG_FIELD_MAP.youtubeUrl] || undefined,
+    metadata,
+    lastModifiedTime: f[SONG_FIELD_MAP.lastModifiedTime],
+    createdTime: f[SONG_FIELD_MAP.created] || record.createdTime,
   };
 }
 

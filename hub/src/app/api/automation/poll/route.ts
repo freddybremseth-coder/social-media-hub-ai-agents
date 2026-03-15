@@ -1,45 +1,22 @@
 import { NextResponse } from 'next/server';
-import { pollForSongTriggers, pollForBrandVideoTriggers, isConfigured } from '@/server/services/integrations/airtable-client';
-
-const MOCK_TRIGGERS = {
-  songs: [
-    {
-      id: 'rec_mock_song_01',
-      title: 'Neon Cascade',
-      artist: 'Neural Beat',
-      audioUrl: 'https://example.com/audio/neon-cascade.mp3',
-      status: 'Trigger' as const,
-      genre: 'Synthwave',
-      mood: 'energetic',
-      bpm: 128,
-    },
-  ],
-  brandVideos: [
-    {
-      id: 'rec_mock_brand_01',
-      brandId: 'zenecohomes',
-      title: 'Modern Villa Tour - Biar Heights',
-      description: 'Walk-through of newly listed villa with mountain views',
-      videoUrl: 'https://example.com/videos/villa-biar.mp4',
-      status: 'Trigger' as const,
-    },
-  ],
-};
+import { getSongsWithoutYouTube, pollForBrandVideoTriggers, isConfigured } from '@/server/services/integrations/airtable-client';
 
 export async function POST() {
   try {
     if (!isConfigured()) {
       return NextResponse.json({
-        songs: MOCK_TRIGGERS.songs,
-        brandVideos: MOCK_TRIGGERS.brandVideos,
-        totalTriggers: MOCK_TRIGGERS.songs.length + MOCK_TRIGGERS.brandVideos.length,
-        source: 'mock',
-        message: 'Airtable not configured. Set AIRTABLE_API_KEY and AIRTABLE_BASE_ID. Returning mock triggers.',
+        songs: [],
+        brandVideos: [],
+        totalTriggers: 0,
+        source: 'not-configured',
+        message: 'Airtable not configured. Set AIRTABLE_API_KEY and AIRTABLE_BASE_ID.',
       });
     }
 
+    // Songs: find records without a YouTube URL (ready for processing)
+    // Brand Videos: still uses Status-based polling
     const [songs, brandVideos] = await Promise.all([
-      pollForSongTriggers(),
+      getSongsWithoutYouTube(),
       pollForBrandVideoTriggers(),
     ]);
 

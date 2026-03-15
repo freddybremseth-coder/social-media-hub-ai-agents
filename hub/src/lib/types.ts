@@ -96,8 +96,8 @@ export interface AirtableSongRecord {
   id: string;
   title: string;
   artist: string;
-  audioUrl: string;
-  status: 'Trigger' | 'Processing' | 'Done' | 'Error';
+  audioUrl?: string;
+  status?: 'Trigger' | 'Processing' | 'Done' | 'Error';
   genre?: string;
   mood?: string;
   bpm?: number;
@@ -108,6 +108,8 @@ export interface AirtableSongRecord {
   youtubeVideoId?: string;
   errorMessage?: string;
   metadata?: Record<string, any>;
+  lastModifiedTime?: string;
+  createdTime?: string;
 }
 
 export interface AirtableBrandVideoRecord {
