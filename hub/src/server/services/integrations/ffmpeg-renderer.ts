@@ -22,6 +22,36 @@ import * as os from 'os';
 
 const execFileAsync = promisify(execFile);
 
+// ─── FFmpeg/FFprobe binary resolution ───────────────────────
+// Use bundled static binaries (ffmpeg-static/ffprobe-static) when available,
+// falling back to system-installed binaries. This is essential for Vercel
+// serverless deployment where system FFmpeg is not available.
+
+let FFMPEG_PATH = 'ffmpeg';
+let FFPROBE_PATH = 'ffprobe';
+
+try {
+  // ffmpeg-static exports the absolute path to the binary
+  const ffmpegStatic = require('ffmpeg-static');
+  if (ffmpegStatic && typeof ffmpegStatic === 'string') {
+    FFMPEG_PATH = ffmpegStatic;
+    console.log(`[FFmpeg] Using bundled binary: ${FFMPEG_PATH}`);
+  }
+} catch {
+  // Not installed, use system ffmpeg
+}
+
+try {
+  // ffprobe-static exports { path: '/absolute/path/to/ffprobe' }
+  const ffprobeStatic = require('ffprobe-static');
+  if (ffprobeStatic?.path && typeof ffprobeStatic.path === 'string') {
+    FFPROBE_PATH = ffprobeStatic.path;
+    console.log(`[FFmpeg] Using bundled ffprobe: ${FFPROBE_PATH}`);
+  }
+} catch {
+  // Not installed, use system ffprobe
+}
+
 // ─── Constants ──────────────────────────────────────────────
 
 const FPS = 30;
@@ -80,7 +110,7 @@ export interface FFmpegRenderResult {
  * Get audio duration using ffprobe.
  */
 async function getAudioDuration(audioPath: string): Promise<number> {
-  const { stdout } = await execFileAsync('ffprobe', [
+  const { stdout } = await execFileAsync(FFPROBE_PATH, [
     '-v', 'quiet',
     '-show_entries', 'format=duration',
     '-of', 'csv=p=0',
@@ -128,7 +158,7 @@ async function findFontPath(): Promise<string | null> {
  */
 async function hasDrawtextFilter(): Promise<boolean> {
   try {
-    const { stdout } = await execFileAsync('ffmpeg', ['-filters']);
+    const { stdout } = await execFileAsync(FFMPEG_PATH, ['-filters']);
     return stdout.includes('drawtext');
   } catch {
     return false;
@@ -305,8 +335,19 @@ export async function renderVideo(options: FFmpegRenderOptions): Promise<FFmpegR
     // Audio input (last)
     args.push('-i', audioPath);
 
-    // Filter complex from file (FFmpeg 8+ syntax)
-    args.push('-/filter_complex', filterPath);
+    // Filter complex from file
+    // FFmpeg 8+: -/filter_complex <file>
+    // FFmpeg 5-7: -filter_complex_script <file>
+    // Detect version to use the right syntax
+    let useNewSyntax = false;
+    try {
+      const { stdout: versionOut } = await execFileAsync(FFMPEG_PATH, ['-version']);
+      const versionMatch = versionOut.match(/ffmpeg version (\d+)/);
+      if (versionMatch && parseInt(versionMatch[1]) >= 8) {
+        useNewSyntax = true;
+      }
+    } catch {}
+    args.push(useNewSyntax ? '-/filter_complex' : '-filter_complex_script', filterPath);
 
     // Map video + audio
     const audioInputIndex = imageCount;
@@ -331,7 +372,7 @@ export async function renderVideo(options: FFmpegRenderOptions): Promise<FFmpegR
     const startTime = Date.now();
 
     await new Promise<void>((resolve, reject) => {
-      const proc = spawn('ffmpeg', args, {
+      const proc = spawn(FFMPEG_PATH, args, {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
@@ -414,7 +455,7 @@ export async function cleanupRender(videoPath: string): Promise<void> {
  */
 export async function isAvailable(): Promise<boolean> {
   try {
-    await execFileAsync('ffmpeg', ['-version']);
+    await execFileAsync(FFMPEG_PATH, ['-version']);
     return true;
   } catch {
     return false;
@@ -426,6 +467,16 @@ export async function isAvailable(): Promise<boolean> {
  * Drop-in replacement for Creatomate's isConfigured().
  */
 export function isConfigured(): boolean {
+  // If using bundled static binary, check if the file exists
+  if (FFMPEG_PATH !== 'ffmpeg') {
+    try {
+      require('fs').accessSync(FFMPEG_PATH);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  // Fallback: check system PATH
   try {
     require('child_process').execSync('which ffmpeg', { stdio: 'pipe' });
     return true;
