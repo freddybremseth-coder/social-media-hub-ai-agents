@@ -26,38 +26,29 @@ const execFileAsync = promisify(execFile);
 // ─── FFmpeg binary resolution ────────────────────────────────
 // Uses the vercel-labs/ffmpeg-on-vercel approach:
 // 1. Try process.cwd() + hardcoded relative path (works on Vercel serverless)
-// 2. Try require() resolution (works in local dev)
-// 3. Fall back to system PATH
+// 2. Fall back to system PATH (works in local dev if ffmpeg is installed)
 //
-// NOTE: We only need ffmpeg (not ffprobe). Audio duration is extracted
-// using `ffmpeg -i` which outputs format info to stderr. This avoids
-// the ffprobe-static package whose multi-platform binary structure
-// doesn't deploy reliably on Vercel serverless.
+// We do NOT use require('ffmpeg-static') because:
+// - serverExternalPackages pulls in the entire package dependency tree
+// - This pushed the bundle over Vercel's 250 MB limit
+// Instead, outputFileTracingIncludes forces just the binary into the bundle.
 
 function resolveFFmpegPath(): string {
   // Priority 1: Environment variable override
   if (process.env.FFMPEG_PATH) return process.env.FFMPEG_PATH;
 
   // Priority 2: Bundled binary via process.cwd() (Vercel approach)
+  // outputFileTracingIncludes in next.config.mjs ensures this file is in the bundle
   const cwdPath = path.join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg');
   try {
     fsSync.accessSync(cwdPath);
     // Ensure binary is executable (may lose permissions during deployment)
     try { fsSync.chmodSync(cwdPath, 0o755); } catch {}
-    console.log(`[FFmpeg] Using bundled binary (cwd): ${cwdPath}`);
+    console.log(`[FFmpeg] Using bundled binary: ${cwdPath}`);
     return cwdPath;
   } catch {}
 
-  // Priority 3: require() resolution (local development)
-  try {
-    const resolved = require('ffmpeg-static');
-    if (resolved && typeof resolved === 'string') {
-      console.log(`[FFmpeg] Using bundled binary (require): ${resolved}`);
-      return resolved;
-    }
-  } catch {}
-
-  // Fallback: system PATH
+  // Fallback: system PATH (local dev with ffmpeg installed via brew/apt)
   console.log('[FFmpeg] Using system ffmpeg from PATH');
   return 'ffmpeg';
 }
