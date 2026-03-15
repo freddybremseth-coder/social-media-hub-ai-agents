@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Progress } from '@/components/ui/progress';
-import { Music, Loader2, Play, CheckCircle, XCircle, Clock, Zap, Youtube, Radio, Disc3, Waves, PlayCircle, AlertCircle } from 'lucide-react';
+import { Music, Loader2, Play, CheckCircle, XCircle, Clock, Zap, Youtube, Radio, Disc3, Waves, PlayCircle, AlertCircle, Trash2 } from 'lucide-react';
 
 interface Song {
   id: string;
@@ -56,6 +56,8 @@ export default function NeuralBeatPage() {
   const [processingIds, setProcessingIds] = useState<Map<string, string>>(new Map()); // recordId -> pipelineId
   const [pipelineStatuses, setPipelineStatuses] = useState<Record<string, PipelineStatus>>({});
   const [processingAll, setProcessingAll] = useState(false);
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
+  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const pollIntervals = useRef<Map<string, NodeJS.Timeout>>(new Map());
 
   const fetchSongs = useCallback(() => {
@@ -171,6 +173,38 @@ export default function NeuralBeatPage() {
       await handleProcess(song.id);
     }
     setProcessingAll(false);
+  };
+
+  const handleDelete = async (recordId: string, youtubeUrl: string) => {
+    setDeletingIds((prev) => new Set(prev).add(recordId));
+    setDeleteConfirm(null);
+    try {
+      const res = await fetch('/api/neural-beat', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recordId, youtubeUrl }),
+      });
+      if (res.ok) {
+        // Clear any previous pipeline results and refresh
+        setPipelineStatuses((prev) => {
+          const next = { ...prev };
+          delete next[recordId];
+          return next;
+        });
+        setTimeout(fetchSongs, 1000);
+      } else {
+        const data = await res.json();
+        alert(`Delete failed: ${data.error || 'Unknown error'}`);
+      }
+    } catch {
+      alert('Network error deleting video');
+    } finally {
+      setDeletingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(recordId);
+        return next;
+      });
+    }
   };
 
   const getSongStatus = (song: Song): SongStatus => {
@@ -411,14 +445,50 @@ export default function NeuralBeatPage() {
                           )}
 
                           {song.youtubeUrl && (
-                            <a
-                              href={song.youtubeUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-red-400 hover:text-red-300"
-                            >
-                              <Youtube className="h-4 w-4" />
-                            </a>
+                            <>
+                              <a
+                                href={song.youtubeUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-red-400 hover:text-red-300"
+                              >
+                                <Youtube className="h-4 w-4" />
+                              </a>
+                              {deleteConfirm === song.id ? (
+                                <div className="flex items-center gap-1">
+                                  <Button
+                                    size="sm"
+                                    onClick={() => handleDelete(song.id, song.youtubeUrl!)}
+                                    disabled={deletingIds.has(song.id)}
+                                    className="bg-red-600 hover:bg-red-700 h-6 px-2 text-[10px]"
+                                  >
+                                    {deletingIds.has(song.id) ? (
+                                      <Loader2 className="h-3 w-3 animate-spin" />
+                                    ) : (
+                                      'Confirm'
+                                    )}
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    onClick={() => setDeleteConfirm(null)}
+                                    className="h-6 px-2 text-[10px] text-slate-400"
+                                  >
+                                    Cancel
+                                  </Button>
+                                </div>
+                              ) : (
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => setDeleteConfirm(song.id)}
+                                  className="h-7 w-7 p-0 text-slate-500 hover:text-red-400 hover:bg-red-500/10"
+                                  title="Delete from YouTube"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </Button>
+                              )}
+                            </>
                           )}
                         </div>
                       </div>
@@ -539,16 +609,43 @@ export default function NeuralBeatPage() {
                         {song.genre && <Badge className="bg-pink-500/20 text-pink-300 text-[10px]">{song.genre}</Badge>}
                         {song.mood && <Badge className="bg-slate-600/30 text-slate-300 text-[10px]">{song.mood}</Badge>}
                       </div>
-                      {song.youtubeUrl && (
-                        <a
-                          href={song.youtubeUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="mt-3 block text-xs text-red-400 hover:text-red-300 underline"
+                      <div className="flex items-center justify-between mt-3">
+                        {song.youtubeUrl && (
+                          <a
+                            href={song.youtubeUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-red-400 hover:text-red-300 underline"
+                          >
+                            Watch on YouTube &rarr;
+                          </a>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => {
+                            if (deleteConfirm === song.id) {
+                              handleDelete(song.id, song.youtubeUrl!);
+                            } else {
+                              setDeleteConfirm(song.id);
+                            }
+                          }}
+                          disabled={deletingIds.has(song.id)}
+                          className={`h-7 px-2 text-[10px] ${
+                            deleteConfirm === song.id
+                              ? 'bg-red-600 hover:bg-red-700 text-white'
+                              : 'text-slate-500 hover:text-red-400 hover:bg-red-500/10'
+                          }`}
                         >
-                          Watch on YouTube &rarr;
-                        </a>
-                      )}
+                          {deletingIds.has(song.id) ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : deleteConfirm === song.id ? (
+                            'Confirm Delete'
+                          ) : (
+                            <Trash2 className="h-3.5 w-3.5" />
+                          )}
+                        </Button>
+                      </div>
                     </CardContent>
                   </Card>
                 ))}

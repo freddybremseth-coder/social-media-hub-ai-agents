@@ -225,6 +225,20 @@ function mapToSongRecord(record: AirtableRecord): AirtableSongRecord {
   };
 }
 
+/**
+ * Clear YouTube URL, AI Metadata, and Generated Image from a song record,
+ * effectively resetting it to "ready" state for re-processing.
+ */
+export async function clearSongFields(recordId: string): Promise<void> {
+  const { songsTable } = getConfig();
+  await updateRecord(songsTable, recordId, {
+    [SONG_FIELD_MAP.youtubeUrl]: '',
+    [SONG_FIELD_MAP.aiMetadata]: '',
+    // Clear attachment by setting to empty array
+    [SONG_FIELD_MAP.generatedImage]: [],
+  });
+}
+
 // ---- Brand Video helpers ----
 
 export async function pollForBrandVideoTriggers(): Promise<AirtableBrandVideoRecord[]> {

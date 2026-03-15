@@ -1,9 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   getSongs,
+  getSongsWithoutYouTube,
   isConfigured,
   getRecord,
+  clearSongFields,
 } from '@/server/services/integrations/airtable-client';
+import { deleteVideo, extractVideoId } from '@/server/services/integrations/youtube-client';
 import { NeuralBeatPipeline } from '@/server/services/pipelines/neural-beat-pipeline';
 import type { AirtableSongRecord, PipelineRun } from '@/lib/types';
 
@@ -128,11 +131,25 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { recordId } = body;
+    let { recordId } = body;
+    const { auto } = body;
+
+    // Auto-mode: pick the next unpublished song automatically
+    if (auto && !recordId) {
+      const unpublished = await getSongsWithoutYouTube();
+      const withAudio = unpublished.filter((s) => s.audioUrl);
+      if (withAudio.length === 0) {
+        return NextResponse.json(
+          { message: 'No unpublished songs with audio available', status: 'idle' },
+          { status: 200 }
+        );
+      }
+      recordId = withAudio[0].id;
+    }
 
     if (!recordId) {
       return NextResponse.json(
-        { error: 'recordId is required' },
+        { error: 'recordId is required (or use { auto: true })' },
         { status: 400 }
       );
     }
@@ -185,6 +202,59 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Failed to trigger Neural Beat processing' },
+      { status: 500 }
+    );
+  }
+}
+
+/**
+ * DELETE /api/neural-beat
+ * Delete a video from YouTube and clear Airtable fields.
+ * Body: { recordId: string, youtubeUrl: string }
+ */
+export async function DELETE(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const { recordId, youtubeUrl } = body;
+
+    if (!recordId || !youtubeUrl) {
+      return NextResponse.json(
+        { error: 'recordId and youtubeUrl are required' },
+        { status: 400 }
+      );
+    }
+
+    // 1. Extract video ID from YouTube URL
+    const videoId = extractVideoId(youtubeUrl);
+    if (!videoId) {
+      return NextResponse.json(
+        { error: `Could not extract video ID from URL: ${youtubeUrl}` },
+        { status: 400 }
+      );
+    }
+
+    // 2. Delete from YouTube
+    try {
+      await deleteVideo(videoId);
+    } catch (ytError) {
+      const msg = ytError instanceof Error ? ytError.message : String(ytError);
+      // If video already deleted (404), continue to clear Airtable
+      if (!msg.includes('404') && !msg.includes('videoNotFound')) {
+        throw new Error(`YouTube delete failed: ${msg}`);
+      }
+      console.warn(`[NeuralBeat] Video ${videoId} already deleted or not found, clearing Airtable anyway`);
+    }
+
+    // 3. Clear Airtable fields (YouTube URL, AI Metadata, Generated Image)
+    await clearSongFields(recordId);
+
+    return NextResponse.json({
+      success: true,
+      message: `Video ${videoId} deleted from YouTube and Airtable fields cleared.`,
+    });
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Failed to delete video' },
       { status: 500 }
     );
   }
