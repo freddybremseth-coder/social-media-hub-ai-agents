@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { waitUntil } from '@vercel/functions';
 import {
   getSongs,
   getSongsWithoutYouTube,
@@ -9,6 +10,9 @@ import {
 import { deleteVideo, extractVideoId } from '@/server/services/integrations/youtube-client';
 import { NeuralBeatPipeline } from '@/server/services/pipelines/neural-beat-pipeline';
 import type { AirtableSongRecord, PipelineRun } from '@/lib/types';
+
+// ─── Vercel serverless: allow up to 5 minutes for pipeline execution ──
+export const maxDuration = 300;
 
 // Field mapping for the "Make.com Songs" Airtable table
 const SONG_FIELD_MAP = {
@@ -60,6 +64,8 @@ function mapRawRecordToSong(record: { id: string; fields: Record<string, any> })
 
 // ─── In-memory pipeline tracking ────────────────────────────────────
 // Stores running/completed pipeline results so the frontend can poll.
+// waitUntil() keeps the serverless function alive during pipeline execution,
+// ensuring this Map stays available for GET polling requests.
 const activePipelines = new Map<string, {
   recordId: string;
   pipeline: NeuralBeatPipeline;
@@ -177,14 +183,25 @@ export async function POST(request: NextRequest) {
       startedAt: new Date().toISOString(),
     });
 
-    // Fire-and-forget: start the pipeline in the background
-    // pipeline.currentRun is updated in real-time during execution,
-    // so the GET polling endpoint can return live step progress.
-    pipeline.execute(songRecord).then((pipelineRun) => {
+    // ─── Execute pipeline with waitUntil ──────────────────────────────
+    // waitUntil() tells Vercel to keep the serverless function alive
+    // even after the HTTP response is sent. This prevents the pipeline
+    // from being killed mid-execution on serverless platforms.
+    //
+    // On non-Vercel environments, waitUntil is a no-op graceful fallback.
+    const pipelinePromise = pipeline.execute(songRecord).then((pipelineRun) => {
       console.log(`[NeuralBeat] Pipeline ${pipelineId} finished: ${pipelineRun.status}`);
     }).catch((err) => {
       console.error(`[NeuralBeat] Pipeline ${pipelineId} crashed:`, err);
     });
+
+    // Keep the serverless function alive until the pipeline completes
+    try {
+      waitUntil(pipelinePromise);
+    } catch {
+      // waitUntil not available (local dev / non-Vercel) — pipeline runs as fire-and-forget
+      console.log('[NeuralBeat] waitUntil not available, running as fire-and-forget');
+    }
 
     // Clean up old entries periodically
     cleanupOldPipelines();

@@ -1,6 +1,6 @@
 import { updateSongStatus, updateSongFields } from '@/server/services/integrations/airtable-client';
 import { analyzeSong, generateMusicImageSet, generateYouTubeSEO } from '@/server/services/integrations/gemini-client';
-import { renderVideo, cleanupRender } from '@/server/services/integrations/ffmpeg-renderer';
+import { renderVideo, cleanupRender, isAvailable as isFFmpegAvailable } from '@/server/services/integrations/ffmpeg-renderer';
 import { uploadImageToTempHost } from '@/server/services/integrations/creatomate-client';
 import { uploadVideo, setThumbnail } from '@/server/services/integrations/youtube-client';
 import {
@@ -59,6 +59,15 @@ export class NeuralBeatPipeline {
   public currentRun: PipelineRun | null = null;
 
   async execute(songRecord: AirtableSongRecord): Promise<PipelineRun> {
+    // Pre-check: verify FFmpeg is available before starting the pipeline
+    const ffmpegOk = await isFFmpegAvailable();
+    if (!ffmpegOk) {
+      console.error('[NeuralBeatPipeline] FFmpeg is not installed! Pipeline cannot render video.');
+      // We still start the pipeline but will fail at step 6 with a clear message
+    }
+
+    console.log(`[NeuralBeatPipeline] Starting pipeline for "${songRecord.title}" (FFmpeg: ${ffmpegOk ? 'OK' : 'NOT FOUND'})`);
+
     const steps: PipelineStep[] = STEP_NAMES.map((name, index) =>
       createStep(name, index)
     );
