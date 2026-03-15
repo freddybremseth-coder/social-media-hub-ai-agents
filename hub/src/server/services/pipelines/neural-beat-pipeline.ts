@@ -1,13 +1,17 @@
 import { updateSongStatus, updateSongFields } from '@/server/services/integrations/airtable-client';
 import { analyzeSong, generateMusicImageSet, generateYouTubeSEO } from '@/server/services/integrations/gemini-client';
-import { renderAndWait, uploadImageToTempHost } from '@/server/services/integrations/creatomate-client';
-import { uploadVideoFromUrl } from '@/server/services/integrations/youtube-client';
+import { renderVideo, cleanupRender } from '@/server/services/integrations/ffmpeg-renderer';
+import { uploadImageToTempHost } from '@/server/services/integrations/creatomate-client';
+import { uploadVideo, setThumbnail } from '@/server/services/integrations/youtube-client';
 import {
   AirtableSongRecord,
   PipelineRun,
   PipelineStep,
 } from '@/lib/types';
 import { generateId } from '@/lib/utils';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import * as os from 'os';
 
 const STEP_NAMES = [
   'Update Airtable Status to Processing',
@@ -15,8 +19,7 @@ const STEP_NAMES = [
   'Analyze Song with AI',
   'Generate YouTube SEO Metadata',
   'Generate 10 Cover Images',
-  'Render Multi-Scene Video',
-  'Wait for Render Completion',
+  'Render Video with FFmpeg',
   'Upload to YouTube',
   'Update Airtable with Results',
 ] as const;
@@ -79,9 +82,12 @@ export class NeuralBeatPipeline {
     let audioUrl: string | null = null;
     let songAnalysis: Awaited<ReturnType<typeof analyzeSong>> | null = null;
     let youtubeMetadata: Awaited<ReturnType<typeof generateYouTubeSEO>> | null = null;
-    let imageUrls: string[] = [];
-    let videoRenderUrl: string | null = null;
+    let localImagePaths: string[] = [];
+    let thumbnailBuffer: Buffer | null = null;
+    let videoRenderPath: string | null = null;
+    let videoBuffer: Buffer | null = null;
     let youtubeUrl: string | null = null;
+    let airtableImageUrl: string | null = null;
 
     try {
       // Step 1: Update Airtable status to "Processing"
@@ -157,7 +163,7 @@ export class NeuralBeatPipeline {
         throw new Error(`Step 4 failed: ${message}`);
       }
 
-      // Step 5: Gemini generates 10 cover images for slideshow video
+      // Step 5: Gemini generates 10 cover images — saved locally for FFmpeg
       currentStepIndex = 4;
       markStepRunning(steps[currentStepIndex]);
       try {
@@ -172,13 +178,33 @@ export class NeuralBeatPipeline {
           count: 10,
         });
 
-        // Upload all images to temp host for Creatomate
-        console.log(`[NeuralBeatPipeline] Uploading ${imageSetResult.images.length} images to temp host...`);
-        const uploadPromises = imageSetResult.images.map((img) =>
-          uploadImageToTempHost(img.base64, img.mimeType)
-        );
-        imageUrls = await Promise.all(uploadPromises);
-        console.log(`[NeuralBeatPipeline] All ${imageUrls.length} images uploaded`);
+        // Save images to local temp files (no need to upload to tmpfiles.org!)
+        const imgTempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nb-images-'));
+        console.log(`[NeuralBeatPipeline] Saving ${imageSetResult.images.length} images to ${imgTempDir}`);
+
+        for (let i = 0; i < imageSetResult.images.length; i++) {
+          const img = imageSetResult.images[i];
+          const ext = img.mimeType.includes('jpeg') || img.mimeType.includes('jpg') ? 'jpg' : 'png';
+          const imgPath = path.join(imgTempDir, `image-${i}.${ext}`);
+          const buffer = Buffer.from(img.base64, 'base64');
+          await fs.writeFile(imgPath, buffer);
+          localImagePaths.push(imgPath);
+        }
+
+        // Keep first image as buffer for YouTube thumbnail
+        thumbnailBuffer = Buffer.from(imageSetResult.images[0].base64, 'base64');
+
+        // Upload first image to tmpfiles.org for Airtable attachment
+        try {
+          airtableImageUrl = await uploadImageToTempHost(
+            imageSetResult.images[0].base64,
+            imageSetResult.images[0].mimeType
+          );
+        } catch (e) {
+          console.warn('[NeuralBeatPipeline] Could not upload image for Airtable (non-fatal):', e);
+        }
+
+        console.log(`[NeuralBeatPipeline] All ${localImagePaths.length} images saved locally`);
         markStepCompleted(steps[currentStepIndex]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -186,17 +212,20 @@ export class NeuralBeatPipeline {
         throw new Error(`Step 5 failed: ${message}`);
       }
 
-      // Step 6: Creatomate renders multi-scene slideshow video
+      // Step 6: FFmpeg renders multi-scene slideshow video (local, $0 cost)
       currentStepIndex = 5;
       markStepRunning(steps[currentStepIndex]);
       try {
-        const renderResult = await renderAndWait({
+        console.log('[NeuralBeatPipeline] Starting FFmpeg render (local, zero cost)...');
+        const renderResult = await renderVideo({
           audioUrl: audioUrl!,
-          images: imageUrls,
+          imagePaths: localImagePaths,
           title: songRecord.title,
           subtitle: songRecord.artist,
         });
-        videoRenderUrl = renderResult.url || null;
+        videoRenderPath = renderResult.videoPath;
+        videoBuffer = renderResult.videoBuffer;
+        console.log(`[NeuralBeatPipeline] Video rendered: ${(renderResult.videoBuffer.length / 1024 / 1024).toFixed(1)} MB`);
         markStepCompleted(steps[currentStepIndex]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -204,13 +233,29 @@ export class NeuralBeatPipeline {
         throw new Error(`Step 6 failed: ${message}`);
       }
 
-      // Step 7: Wait for render completion (handled within renderAndWait, mark complete)
+      // Step 7: Upload video buffer directly to YouTube (no intermediate download)
       currentStepIndex = 6;
       markStepRunning(steps[currentStepIndex]);
       try {
-        if (!videoRenderUrl) {
-          throw new Error('No video render URL returned from Creatomate');
+        const uploadResult = await uploadVideo(videoBuffer!, {
+          title: youtubeMetadata!.title,
+          description: youtubeMetadata!.description,
+          tags: youtubeMetadata!.tags,
+          categoryId: youtubeMetadata!.categoryId,
+          privacyStatus: (youtubeMetadata!.privacyStatus as 'public' | 'private' | 'unlisted') || 'public',
+        });
+        youtubeUrl = uploadResult.youtubeUrl;
+
+        // Try to set custom thumbnail (requires channel verification)
+        if (thumbnailBuffer) {
+          try {
+            await setThumbnail(uploadResult.videoId, thumbnailBuffer);
+            console.log('[NeuralBeatPipeline] Custom thumbnail set successfully');
+          } catch (e) {
+            console.warn('[NeuralBeatPipeline] Could not set custom thumbnail (non-fatal):', e);
+          }
         }
+
         markStepCompleted(steps[currentStepIndex]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -218,33 +263,8 @@ export class NeuralBeatPipeline {
         throw new Error(`Step 7 failed: ${message}`);
       }
 
-      // Step 8: YouTube uploads video with AI-generated metadata
+      // Step 8: Update Airtable with YouTube URL, AI Metadata, and Generated Image
       currentStepIndex = 7;
-      markStepRunning(steps[currentStepIndex]);
-      try {
-        const uploadResult = await uploadVideoFromUrl({
-          videoUrl: videoRenderUrl!,
-          title: youtubeMetadata!.title,
-          description: youtubeMetadata!.description,
-          tags: youtubeMetadata!.tags,
-          categoryId: youtubeMetadata!.categoryId,
-          privacyStatus: youtubeMetadata!.privacyStatus || 'public',
-          thumbnailUrl: imageUrls[0],
-        });
-        youtubeUrl = uploadResult.youtubeUrl;
-        markStepCompleted(steps[currentStepIndex]);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        markStepFailed(steps[currentStepIndex], message);
-        throw new Error(`Step 8 failed: ${message}`);
-      }
-
-      // Step 9: Update Airtable with YouTube URL, AI Metadata, and Generated Image
-      // Uses updateSongFields which maps to the correct Airtable column names:
-      //   youtubeUrl  -> "YouTube URL"
-      //   aiMetadata  -> "AI Metadata" (JSON stringified)
-      //   imageUrl    -> "Generated Image" (attachment array)
-      currentStepIndex = 8;
       markStepRunning(steps[currentStepIndex]);
       try {
         await updateSongFields(songRecord.id, {
@@ -257,15 +277,16 @@ export class NeuralBeatPipeline {
             youtubeTitle: youtubeMetadata!.title,
             youtubeDescription: youtubeMetadata!.description,
             tags: youtubeMetadata!.tags,
+            renderer: 'ffmpeg',  // Track which renderer was used
             processedAt: new Date().toISOString(),
           },
-          ...(imageUrls.length > 0 ? { imageUrl: imageUrls[0] } : {}),
+          ...(airtableImageUrl ? { imageUrl: airtableImageUrl } : {}),
         });
         markStepCompleted(steps[currentStepIndex]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         markStepFailed(steps[currentStepIndex], message);
-        throw new Error(`Step 9 failed: ${message}`);
+        throw new Error(`Step 8 failed: ${message}`);
       }
 
       // Pipeline completed successfully
@@ -275,8 +296,8 @@ export class NeuralBeatPipeline {
         youtubeUrl,
         songAnalysis,
         youtubeMetadata,
-        imageUrls,
-        videoRenderUrl,
+        localImagePaths,
+        airtableImageUrl,
       };
     } catch (error) {
       // Mark all remaining pending steps as skipped
@@ -304,6 +325,24 @@ export class NeuralBeatPipeline {
           '[NeuralBeatPipeline] Failed to update Airtable error metadata:',
           airtableError
         );
+      }
+    } finally {
+      // Clean up temp files (render directory + image directory)
+      if (videoRenderPath) {
+        try {
+          await cleanupRender(videoRenderPath);
+        } catch {
+          console.warn('[NeuralBeatPipeline] Could not clean up render temp files');
+        }
+      }
+      if (localImagePaths.length > 0) {
+        const imgDir = path.dirname(localImagePaths[0]);
+        try {
+          await fs.rm(imgDir, { recursive: true });
+          console.log('[NeuralBeatPipeline] Cleaned up image temp files');
+        } catch {
+          console.warn('[NeuralBeatPipeline] Could not clean up image temp files');
+        }
       }
     }
 
