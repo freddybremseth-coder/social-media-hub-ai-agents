@@ -361,6 +361,7 @@ export async function analyzeSong(
   energy: 'low' | 'medium' | 'high';
   visualStyle: string;
   targetAudience: string;
+  imageGenre: string;
 }> {
   const metadata = options.metadata;
   const prompt = `You are a music analyst specialized in EDM and electronic music.
@@ -380,7 +381,8 @@ Respond with ONLY this JSON structure, no markdown:
   "mood": "mood (e.g., euphoric, dark, chill, energetic)",
   "energy": "low|medium|high",
   "visualStyle": "description of visual style that fits the music",
-  "targetAudience": "target audience for this type of music"
+  "targetAudience": "target audience for this type of music",
+  "imageGenre": "MUST be exactly one of: romantic, sensual, rock, pop, dance, dream, nostalgic, training — pick the best visual category for this song's mood and energy"
 }`;
 
   const result = await askGemini(prompt, { temperature: 0.3, maxTokens: 500 });
@@ -400,6 +402,7 @@ Respond with ONLY this JSON structure, no markdown:
     energy: 'high',
     visualStyle: 'Neon cyberpunk with abstract geometric shapes',
     targetAudience: 'EDM fans and electronic music lovers',
+    imageGenre: 'dance',
   };
 }
 

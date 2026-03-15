@@ -1,7 +1,6 @@
-import { updateSongStatus, updateSongFields } from '@/server/services/integrations/airtable-client';
-import { analyzeSong, generateMusicImageSet, generateYouTubeSEO } from '@/server/services/integrations/gemini-client';
+import { updateSongStatus, updateSongFields, getGenreImages } from '@/server/services/integrations/airtable-client';
+import { analyzeSong, generateYouTubeSEO } from '@/server/services/integrations/gemini-client';
 import { renderVideo, cleanupRender, isAvailable as isFFmpegAvailable } from '@/server/services/integrations/ffmpeg-renderer';
-import { uploadImageToTempHost } from '@/server/services/integrations/creatomate-client';
 import { uploadVideo, setThumbnail } from '@/server/services/integrations/youtube-client';
 import {
   AirtableSongRecord,
@@ -18,7 +17,7 @@ const STEP_NAMES = [
   'Download Audio File',
   'Analyze Song with AI',
   'Generate YouTube SEO Metadata',
-  'Generate 6 Cover Images',
+  'Fetch Genre Images',
   'Render Video with FFmpeg',
   'Upload to YouTube',
   'Update Airtable with Results',
@@ -184,53 +183,63 @@ export class NeuralBeatPipeline {
         throw new Error(`Step 4 failed: ${message}`);
       }
 
-      // Step 5: Gemini generates cover images — saved locally for FFmpeg
+      // Step 5: Fetch genre-matching images from Airtable (pre-uploaded by user)
+      // This replaces Gemini image generation — $0 cost, ~5-10s instead of ~40-60s
       currentStepIndex = 4;
       stepRunning(steps[currentStepIndex]);
       try {
-        console.log('[NeuralBeatPipeline] Starting image generation with Gemini...');
-        const imageSetResult = await generateMusicImageSet({
-          title: songRecord.title,
-          artist: songRecord.artist,
-          genre: songAnalysis!.genre,
-          style: songAnalysis!.style,
-          mood: songAnalysis!.mood,
-          energy: songAnalysis!.energy,
-          visualStyle: songAnalysis!.visualStyle,
-          count: 6, // 6 images — start smaller, scale up if successful
+        const imageGenre = songAnalysis!.imageGenre || 'dance';
+        console.log(`[NeuralBeatPipeline] Fetching genre images for "${imageGenre}"...`);
+        steps[currentStepIndex].result = `Looking for "${imageGenre}" images...`;
+        notify();
+
+        const genreImages = await getGenreImages(imageGenre, 20);
+
+        if (genreImages.length === 0) {
+          throw new Error(`No images found in Airtable for genre "${imageGenre}" or fallbacks. Please upload images to the "Genre Images" table.`);
+        }
+
+        console.log(`[NeuralBeatPipeline] Found ${genreImages.length} images for genre "${imageGenre}"`);
+        steps[currentStepIndex].result = `Found ${genreImages.length} images for "${imageGenre}"`;
+        notify();
+
+        // Download images to local temp files (parallel for speed)
+        const imgTempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nb-images-'));
+        console.log(`[NeuralBeatPipeline] Downloading ${genreImages.length} images to ${imgTempDir}`);
+
+        const downloadPromises = genreImages.map(async (img, i) => {
+          const imgPath = path.join(imgTempDir, `image-${i}.jpg`);
+          const response = await fetch(img.imageUrl);
+          if (!response.ok) {
+            console.warn(`[NeuralBeatPipeline] Failed to download image ${i}: ${response.status}`);
+            return null;
+          }
+          const buffer = Buffer.from(await response.arrayBuffer());
+          await fs.writeFile(imgPath, buffer);
+          return imgPath;
         });
 
-        // Save images to local temp files (no need to upload to tmpfiles.org!)
-        const imgTempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'nb-images-'));
-        console.log(`[NeuralBeatPipeline] Saving ${imageSetResult.images.length} images to ${imgTempDir}`);
+        const downloadedPaths = await Promise.all(downloadPromises);
+        localImagePaths = downloadedPaths.filter((p): p is string => p !== null);
 
-        for (let i = 0; i < imageSetResult.images.length; i++) {
-          const img = imageSetResult.images[i];
-          const ext = img.mimeType.includes('jpeg') || img.mimeType.includes('jpg') ? 'jpg' : 'png';
-          const imgPath = path.join(imgTempDir, `image-${i}.${ext}`);
-          const buffer = Buffer.from(img.base64, 'base64');
-          await fs.writeFile(imgPath, buffer);
-          localImagePaths.push(imgPath);
+        if (localImagePaths.length === 0) {
+          throw new Error('All image downloads failed. Check Airtable image URLs.');
         }
 
         // Keep first image as buffer for YouTube thumbnail
-        thumbnailBuffer = Buffer.from(imageSetResult.images[0].base64, 'base64');
-
-        // Upload first image to tmpfiles.org for Airtable attachment
         try {
-          airtableImageUrl = await uploadImageToTempHost(
-            imageSetResult.images[0].base64,
-            imageSetResult.images[0].mimeType
-          );
-        } catch (e) {
-          console.warn('[NeuralBeatPipeline] Could not upload image for Airtable (non-fatal):', e);
+          const thumbResponse = await fetch(genreImages[0].imageUrl);
+          if (thumbResponse.ok) {
+            thumbnailBuffer = Buffer.from(await thumbResponse.arrayBuffer());
+          }
+        } catch {
+          console.warn('[NeuralBeatPipeline] Could not download thumbnail (non-fatal)');
         }
 
-        console.log(`[NeuralBeatPipeline] All ${localImagePaths.length} images saved locally`);
+        // Use first image URL for Airtable record (Airtable can link directly)
+        airtableImageUrl = genreImages[0].imageUrl;
 
-        // Free base64 image data from memory — images are now saved as files
-        // Each image is ~1-3 MB base64, so 6 images = ~6-18 MB freed
-        imageSetResult.images.length = 0;
+        console.log(`[NeuralBeatPipeline] ${localImagePaths.length} images ready for rendering`);
 
         stepCompleted(steps[currentStepIndex]);
       } catch (error) {

@@ -8,6 +8,7 @@ function getConfig() {
     baseId: process.env.AIRTABLE_BASE_ID || '',
     songsTable: process.env.AIRTABLE_SONGS_TABLE || 'Songs',
     brandVideosTable: process.env.AIRTABLE_BRAND_VIDEOS_TABLE || 'BrandVideos',
+    genreImagesTable: process.env.AIRTABLE_GENRE_IMAGES_TABLE || 'Genre Images',
   };
 }
 
@@ -278,6 +279,100 @@ function extractAttachmentUrl(field: any): string {
   if (typeof field === 'string') return field;
   if (Array.isArray(field) && field.length > 0) return field[0].url || '';
   return '';
+}
+
+// ---- Genre Images helpers ----
+
+/**
+ * Airtable "Genre Images" table column mapping.
+ * Table should have: Genre (single select/text), Image (attachment)
+ */
+const GENRE_IMAGE_FIELD_MAP = {
+  genre: 'Genre',
+  image: 'Image',
+} as const;
+
+export interface GenreImage {
+  id: string;
+  genre: string;
+  imageUrl: string;
+}
+
+/**
+ * Fetch images from Airtable for a specific genre, randomly shuffled.
+ * Returns up to `count` images (default 20).
+ *
+ * If no images found for the exact genre, tries broader fallback genres
+ * before returning an empty array.
+ */
+export async function getGenreImages(genre: string, count = 20): Promise<GenreImage[]> {
+  const { genreImagesTable } = getConfig();
+
+  // Try exact match first, then fallbacks
+  const genresToTry = [genre, ...getGenreFallbacks(genre)];
+
+  for (const g of genresToTry) {
+    const filter = `{${GENRE_IMAGE_FIELD_MAP.genre}} = '${g}'`;
+    const records = await listRecords(genreImagesTable, filter, 100);
+
+    const images = records
+      .map((record) => ({
+        id: record.id,
+        genre: record.fields[GENRE_IMAGE_FIELD_MAP.genre] || '',
+        imageUrl: extractAttachmentUrl(record.fields[GENRE_IMAGE_FIELD_MAP.image]),
+      }))
+      .filter((img) => img.imageUrl);
+
+    if (images.length > 0) {
+      console.log(`[Airtable] Found ${images.length} images for genre "${g}" (requested "${genre}")`);
+      const shuffled = shuffleArray(images);
+      return shuffled.slice(0, count);
+    }
+  }
+
+  console.warn(`[Airtable] No genre images found for "${genre}" or fallbacks`);
+  return [];
+}
+
+/**
+ * Get all unique genres that have images in the database.
+ */
+export async function getAvailableGenres(): Promise<string[]> {
+  const { genreImagesTable } = getConfig();
+  const records = await listRecords(genreImagesTable, undefined, 100);
+  const genres = new Set<string>();
+  for (const record of records) {
+    const genre = record.fields[GENRE_IMAGE_FIELD_MAP.genre];
+    if (genre) genres.add(genre);
+  }
+  return Array.from(genres).sort();
+}
+
+/**
+ * Returns fallback genres to try if the primary genre has no images.
+ */
+function getGenreFallbacks(genre: string): string[] {
+  const lower = genre.toLowerCase();
+  const fallbackMap: Record<string, string[]> = {
+    romantic: ['sensual', 'dream'],
+    sensual: ['romantic', 'dream'],
+    rock: ['training', 'pop'],
+    pop: ['dance', 'dream'],
+    dance: ['training', 'pop'],
+    dream: ['nostalgic', 'romantic'],
+    nostalgic: ['dream', 'romantic'],
+    training: ['dance', 'rock'],
+  };
+  return fallbackMap[lower] || ['pop', 'dream'];
+}
+
+function shuffleArray<T>(array: T[]): T[] {
+  const arr = [...array];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
 }
 
 export function isConfigured(): boolean {

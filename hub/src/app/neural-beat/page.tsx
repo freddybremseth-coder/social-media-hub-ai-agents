@@ -43,8 +43,8 @@ const PIPELINE_STEPS = [
   { name: 'Download Audio', desc: 'Fetch audio file from Airtable' },
   { name: 'AI Analysis', desc: 'Gemini analyzes genre, mood, style' },
   { name: 'YouTube SEO', desc: 'Gemini generates title, description, tags' },
-  { name: '6 Cover Images', desc: 'Gemini generates album artwork set' },
-  { name: 'FFmpeg Render', desc: 'Local video render with transitions' },
+  { name: 'Genre Images', desc: 'Fetch matching images from database' },
+  { name: 'FFmpeg Render', desc: 'Local video render with slideshow' },
   { name: 'YouTube Upload', desc: 'Upload video with AI metadata' },
   { name: 'Save Results', desc: 'Write back YouTube URL & metadata' },
 ];
@@ -75,6 +75,102 @@ export default function NeuralBeatPage() {
       abortControllers.current.forEach((ctrl) => ctrl.abort());
     };
   }, []);
+
+  /**
+   * Recovery mode: when SSE connection drops, poll the songs API to check
+   * if the pipeline actually completed (Vercel function keeps running even
+   * after the CDN drops the streaming connection).
+   *
+   * Polls every 10s for up to 4 minutes. Shows "Reconnecting" UI.
+   * Returns true if recovery detected completion, false if it timed out.
+   */
+  const pollForCompletion = async (
+    recordId: string,
+    lastStatus: PipelineStatus | null
+  ): Promise<boolean> => {
+    // Show recovery UI — keep processing state but update message
+    setPipelineStatuses((prev) => ({
+      ...prev,
+      [recordId]: {
+        id: lastStatus?.id || '',
+        recordId,
+        status: 'running',
+        steps: lastStatus?.steps?.map((s) =>
+          s.status === 'in_progress'
+            ? { ...s, name: s.name, status: 'in_progress' as const, result: 'Connection lost — checking server...' }
+            : s
+        ) || PIPELINE_STEPS.map((s) => ({ name: s.name, status: 'pending' as const })),
+      },
+    }));
+
+    const MAX_POLLS = 24; // 24 × 10s = 4 minutes
+    const POLL_INTERVAL = 10000; // 10 seconds
+
+    for (let attempt = 1; attempt <= MAX_POLLS; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
+
+      try {
+        const res = await fetch('/api/neural-beat');
+        const data = await res.json();
+        const song = data.songs?.find((s: Song) => s.id === recordId);
+
+        if (song?.youtubeUrl) {
+          // Pipeline completed on the server!
+          setPipelineStatuses((prev) => ({
+            ...prev,
+            [recordId]: {
+              id: lastStatus?.id || '',
+              recordId,
+              status: 'completed',
+              steps: PIPELINE_STEPS.map((s) => ({
+                name: s.name,
+                status: 'completed' as const,
+              })),
+              output: { youtubeUrl: song.youtubeUrl },
+            },
+          }));
+          setProcessingIds((prev) => {
+            const next = new Map(prev);
+            next.delete(recordId);
+            return next;
+          });
+          setTimeout(fetchSongs, 2000);
+          return true;
+        }
+      } catch {
+        // Network error — keep trying
+      }
+
+      // Update UI with poll attempt count
+      setPipelineStatuses((prev) => ({
+        ...prev,
+        [recordId]: {
+          ...prev[recordId],
+          id: lastStatus?.id || prev[recordId]?.id || '',
+          recordId,
+          status: 'running',
+          steps: prev[recordId]?.steps?.map((s) =>
+            s.status === 'in_progress'
+              ? { ...s, result: `Connection lost — checking server (${attempt}/${MAX_POLLS})...` }
+              : s
+          ) || [],
+        },
+      }));
+    }
+
+    // Exhausted all retries — show failure
+    setPipelineStatuses((prev) => ({
+      ...prev,
+      [recordId]: {
+        id: lastStatus?.id || '',
+        recordId,
+        status: 'failed',
+        steps: lastStatus?.steps || [],
+        error: 'Pipeline connection lost. The server may still be processing — refresh the page in a few minutes to check.',
+      },
+    }));
+    return false;
+  };
 
   const handleProcess = async (recordId: string) => {
     // Mark as processing
@@ -171,40 +267,39 @@ export default function NeuralBeatPage() {
         processSSEMessages(buffer + '\n\n');
       }
 
-      // Stream ended — if we never got a final status, show an error
-      setProcessingIds((prev) => {
-        const next = new Map(prev);
-        next.delete(recordId);
-        return next;
-      });
-
-      if (!lastStatus || lastStatus.status === 'running') {
-        // Stream ended without a completed/failed message — likely Vercel timeout
-        setPipelineStatuses((prev) => ({
-          ...prev,
-          [recordId]: {
-            id: lastStatus?.id || '',
-            recordId,
-            status: 'failed',
-            steps: lastStatus?.steps || [],
-            error: 'Pipeline connection lost — the server may have timed out. Check Vercel logs for details.',
-          },
-        }));
+      // Stream ended — check if pipeline actually completed on server
+      // TypeScript can't track lastStatus mutations through processSSEMessages closure
+      const finalStatus = lastStatus as PipelineStatus | null;
+      if (!finalStatus || finalStatus.status === 'running') {
+        // SSE connection dropped but pipeline may still be running on Vercel.
+        // Enter recovery mode: poll the songs API to detect completion.
+        const recovered = await pollForCompletion(recordId, finalStatus);
+        if (!recovered) {
+          setProcessingIds((prev) => {
+            const next = new Map(prev);
+            next.delete(recordId);
+            return next;
+          });
+        }
+      } else {
+        setProcessingIds((prev) => {
+          const next = new Map(prev);
+          next.delete(recordId);
+          return next;
+        });
       }
     } catch (err) {
       if ((err as Error)?.name === 'AbortError') return; // User navigated away
-      setPipelineStatuses((prev) => ({
-        ...prev,
-        [recordId]: {
-          id: '', recordId, status: 'failed', steps: [],
-          error: 'Connection lost during pipeline execution',
-        },
-      }));
-      setProcessingIds((prev) => {
-        const next = new Map(prev);
-        next.delete(recordId);
-        return next;
-      });
+      // Connection error — pipeline may still be running on server
+      const lastKnown = pipelineStatuses[recordId] || null;
+      const recovered = await pollForCompletion(recordId, lastKnown as PipelineStatus | null);
+      if (!recovered) {
+        setProcessingIds((prev) => {
+          const next = new Map(prev);
+          next.delete(recordId);
+          return next;
+        });
+      }
     } finally {
       abortControllers.current.delete(recordId);
     }
