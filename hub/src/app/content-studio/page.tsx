@@ -66,7 +66,11 @@ export default function ContentStudio() {
       });
 
       const data = await res.json();
-      setResult(data);
+      if (res.ok && data && !data.error) {
+        setResult(data);
+      } else {
+        console.error('Generation failed:', data?.error || 'Unknown error');
+      }
     } catch (error) {
       console.error('Generation failed:', error);
     } finally {
@@ -86,7 +90,7 @@ export default function ContentStudio() {
       });
 
       const data = await res.json();
-      if (data.result) {
+      if (res.ok && data.result) {
         setResult({
           id: data.id,
           brief: { brand: commandId, platform: 'linkedin', goal: 'awareness', audience: '', tone: '' },
