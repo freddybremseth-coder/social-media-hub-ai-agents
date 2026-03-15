@@ -125,13 +125,17 @@ function buildMusicVideoSource(
   }
 
   // 2. Audio track (determines video duration)
-  elements.push({
+  // Omit duration entirely to use the full audio file length
+  const audioElement: Record<string, any> = {
     type: 'audio',
     track: 2,
     source: options.audioUrl,
-    duration: options.duration || null, // null = full audio length
     audio_fade_out: 3, // 3 second fade out at end
-  });
+  };
+  if (options.duration) {
+    audioElement.duration = options.duration;
+  }
+  elements.push(audioElement);
 
   // 3. Title text overlay (bottom-center, appears after 1s)
   if (options.title) {
