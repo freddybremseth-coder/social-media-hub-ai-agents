@@ -1,4 +1,5 @@
-import { google, youtube_v3 } from 'googleapis';
+import { youtube, type youtube_v3 } from '@googleapis/youtube';
+import { OAuth2Client } from 'google-auth-library';
 import type { YouTubeVideoMetadata, YouTubeUploadResult } from '@/lib/types';
 import { Readable } from 'stream';
 
@@ -13,7 +14,7 @@ function getOAuth2Client() {
     throw new Error('YouTube OAuth2 credentials not configured (YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, YOUTUBE_REFRESH_TOKEN)');
   }
 
-  const oauth2Client = new google.auth.OAuth2(clientId, clientSecret);
+  const oauth2Client = new OAuth2Client(clientId, clientSecret);
   oauth2Client.setCredentials({ refresh_token: refreshToken });
   return oauth2Client;
 }
@@ -21,7 +22,7 @@ function getOAuth2Client() {
 function getClient(): youtube_v3.Youtube {
   if (!youtubeClient) {
     const auth = getOAuth2Client();
-    youtubeClient = google.youtube({ version: 'v3', auth });
+    youtubeClient = youtube({ version: 'v3', auth });
   }
   return youtubeClient;
 }

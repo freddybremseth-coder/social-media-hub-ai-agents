@@ -8,7 +8,7 @@
  * Step 3: Paste the code here to exchange it for a refresh token
  */
 
-import { google } from 'googleapis';
+import { OAuth2Client } from 'google-auth-library';
 import * as readline from 'readline';
 
 const CLIENT_ID = process.env.YOUTUBE_CLIENT_ID;
@@ -21,7 +21,7 @@ if (!CLIENT_ID || !CLIENT_SECRET) {
 }
 const REDIRECT_URI = 'urn:ietf:wg:oauth:2.0:oob';
 
-const oauth2Client = new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
+const oauth2Client = new OAuth2Client(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
 
 const SCOPES = [
   'https://www.googleapis.com/auth/youtube.upload',

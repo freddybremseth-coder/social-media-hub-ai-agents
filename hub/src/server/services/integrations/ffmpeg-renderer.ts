@@ -24,37 +24,74 @@ import * as os from 'os';
 const execFileAsync = promisify(execFile);
 
 // ─── FFmpeg binary resolution ────────────────────────────────
-// Uses the vercel-labs/ffmpeg-on-vercel approach:
-// 1. Try process.cwd() + hardcoded relative path (works on Vercel serverless)
-// 2. Fall back to system PATH (works in local dev if ffmpeg is installed)
+// Strategy:
+// 1. Local dev: use node_modules/ffmpeg-static/ffmpeg (installed via npm)
+// 2. Vercel warm: use /tmp/ffmpeg (cached from previous invocation)
+// 3. Vercel cold: download ffmpeg to /tmp from GitHub releases (~70 MB, ~5-10s)
+// 4. Fallback: system PATH
 //
-// We do NOT use require('ffmpeg-static') because:
-// - serverExternalPackages pulls in the entire package dependency tree
-// - This pushed the bundle over Vercel's 250 MB limit
-// Instead, outputFileTracingIncludes forces just the binary into the bundle.
+// We do NOT bundle ffmpeg in the serverless function because:
+// - The binary is ~43 MB which, combined with other deps, exceeds Vercel's 250 MB limit
+// - Instead, we download it on cold start and cache in /tmp (persists across warm invocations)
 
-function resolveFFmpegPath(): string {
+const FFMPEG_TMP_PATH = path.join(os.tmpdir(), 'ffmpeg');
+// ffmpeg-static v5.3.0 uses release tag b6.1.1
+const FFMPEG_RELEASE_TAG = 'b6.1.1';
+const FFMPEG_DOWNLOAD_URL = `https://github.com/eugeneware/ffmpeg-static/releases/download/${FFMPEG_RELEASE_TAG}/linux-x64`;
+
+let _ffmpegPath: string | null = null;
+
+/**
+ * Ensure ffmpeg binary is available. Downloads to /tmp on Vercel cold start.
+ * Cached across warm invocations.
+ */
+async function ensureFFmpeg(): Promise<string> {
+  // Return cached path if already resolved
+  if (_ffmpegPath) return _ffmpegPath;
+
   // Priority 1: Environment variable override
-  if (process.env.FFMPEG_PATH) return process.env.FFMPEG_PATH;
+  if (process.env.FFMPEG_PATH) {
+    _ffmpegPath = process.env.FFMPEG_PATH;
+    return _ffmpegPath;
+  }
 
-  // Priority 2: Bundled binary via process.cwd() (Vercel approach)
-  // outputFileTracingIncludes in next.config.mjs ensures this file is in the bundle
-  const cwdPath = path.join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg');
-  try {
-    fsSync.accessSync(cwdPath);
-    // Ensure binary is executable (may lose permissions during deployment)
-    try { fsSync.chmodSync(cwdPath, 0o755); } catch {}
-    console.log(`[FFmpeg] Using bundled binary: ${cwdPath}`);
-    return cwdPath;
-  } catch {}
+  // Priority 2: Local node_modules binary (development)
+  const localPath = path.join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg');
+  if (fsSync.existsSync(localPath)) {
+    try { fsSync.chmodSync(localPath, 0o755); } catch {}
+    console.log(`[FFmpeg] Using local binary: ${localPath}`);
+    _ffmpegPath = localPath;
+    return _ffmpegPath;
+  }
 
-  // Fallback: system PATH (local dev with ffmpeg installed via brew/apt)
-  console.log('[FFmpeg] Using system ffmpeg from PATH');
-  return 'ffmpeg';
+  // Priority 3: Cached in /tmp (Vercel warm invocation)
+  if (fsSync.existsSync(FFMPEG_TMP_PATH)) {
+    console.log(`[FFmpeg] Using cached /tmp binary`);
+    _ffmpegPath = FFMPEG_TMP_PATH;
+    return _ffmpegPath;
+  }
+
+  // Priority 4: Download to /tmp (Vercel cold start)
+  console.log(`[FFmpeg] Downloading binary to /tmp from GitHub releases...`);
+  const startTime = Date.now();
+  const response = await fetch(FFMPEG_DOWNLOAD_URL, { redirect: 'follow' });
+  if (!response.ok) {
+    throw new Error(`Failed to download ffmpeg: ${response.status} ${response.statusText} from ${FFMPEG_DOWNLOAD_URL}`);
+  }
+  const buffer = Buffer.from(await response.arrayBuffer());
+  fsSync.writeFileSync(FFMPEG_TMP_PATH, buffer);
+  fsSync.chmodSync(FFMPEG_TMP_PATH, 0o755);
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  console.log(`[FFmpeg] Downloaded ${(buffer.length / 1024 / 1024).toFixed(1)} MB in ${elapsed}s`);
+  _ffmpegPath = FFMPEG_TMP_PATH;
+  return _ffmpegPath;
 }
 
-// Resolve once at module load time
-const FFMPEG_PATH = resolveFFmpegPath();
+// Synchronous path for functions that already ensured ffmpeg
+function getFFmpegPath(): string {
+  if (!_ffmpegPath) throw new Error('FFmpeg not initialized — call ensureFFmpeg() first');
+  return _ffmpegPath;
+}
 
 // ─── Constants ──────────────────────────────────────────────
 
@@ -119,7 +156,7 @@ async function getAudioDuration(audioPath: string): Promise<number> {
   // ffmpeg -i <file> exits with code 1 (no output specified), but stderr has the info
   let stderr = '';
   try {
-    await execFileAsync(FFMPEG_PATH, ['-i', audioPath, '-hide_banner', '-f', 'null', '-']);
+    await execFileAsync(getFFmpegPath(), ['-i', audioPath, '-hide_banner', '-f', 'null', '-']);
   } catch (err: any) {
     stderr = err.stderr || '';
   }
@@ -172,7 +209,7 @@ async function findFontPath(): Promise<string | null> {
  */
 async function hasDrawtextFilter(): Promise<boolean> {
   try {
-    const { stdout } = await execFileAsync(FFMPEG_PATH, ['-filters']);
+    const { stdout } = await execFileAsync(getFFmpegPath(), ['-filters']);
     return stdout.includes('drawtext');
   } catch {
     return false;
@@ -292,6 +329,9 @@ export async function renderVideo(options: FFmpegRenderOptions): Promise<FFmpegR
     throw new Error('At least one image is required');
   }
 
+  // Ensure ffmpeg binary is available (downloads on Vercel cold start)
+  await ensureFFmpeg();
+
   // Create temp directory for working files
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'neural-beat-'));
   console.log(`[FFmpeg] Working directory: ${tempDir}`);
@@ -355,7 +395,7 @@ export async function renderVideo(options: FFmpegRenderOptions): Promise<FFmpegR
     // Detect version to use the right syntax
     let useNewSyntax = false;
     try {
-      const { stdout: versionOut } = await execFileAsync(FFMPEG_PATH, ['-version']);
+      const { stdout: versionOut } = await execFileAsync(getFFmpegPath(), ['-version']);
       const versionMatch = versionOut.match(/ffmpeg version (\d+)/);
       if (versionMatch && parseInt(versionMatch[1]) >= 8) {
         useNewSyntax = true;
@@ -386,7 +426,7 @@ export async function renderVideo(options: FFmpegRenderOptions): Promise<FFmpegR
     const startTime = Date.now();
 
     await new Promise<void>((resolve, reject) => {
-      const proc = spawn(FFMPEG_PATH, args, {
+      const proc = spawn(getFFmpegPath(), args, {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
@@ -466,38 +506,26 @@ export async function cleanupRender(videoPath: string): Promise<void> {
 
 /**
  * Check if FFmpeg is available on this system.
- * Ensures binary is executable before testing.
+ * Attempts to download if not available (Vercel cold start).
  */
 export async function isAvailable(): Promise<boolean> {
   try {
-    // Ensure executable permission (Vercel may strip it during deployment)
-    if (FFMPEG_PATH !== 'ffmpeg') {
-      try { fsSync.chmodSync(FFMPEG_PATH, 0o755); } catch {}
-    }
-    const { stdout } = await execFileAsync(FFMPEG_PATH, ['-version']);
+    const ffmpegPath = await ensureFFmpeg();
+    const { stdout } = await execFileAsync(ffmpegPath, ['-version']);
     console.log(`[FFmpeg] Available: ${stdout.split('\n')[0]}`);
     return true;
   } catch (err) {
     console.error('[FFmpeg] isAvailable check failed:', err instanceof Error ? err.message : err);
-    console.error('[FFmpeg] FFMPEG_PATH:', FFMPEG_PATH, 'exists:', fsSync.existsSync(FFMPEG_PATH));
     return false;
   }
 }
 
 /**
  * Check if FFmpeg is configured and available.
- * Drop-in replacement for Creatomate's isConfigured().
+ * Returns true optimistically — actual availability is checked by isAvailable().
+ * On Vercel, ffmpeg is downloaded at runtime so it's always "configured".
  */
 export function isConfigured(): boolean {
-  // If using bundled static binary, check if the file exists
-  if (FFMPEG_PATH !== 'ffmpeg') {
-    return fsSync.existsSync(FFMPEG_PATH);
-  }
-  // Fallback: check system PATH
-  try {
-    require('child_process').execSync('which ffmpeg', { stdio: 'pipe' });
-    return true;
-  } catch {
-    return false;
-  }
+  // Always return true — ffmpeg will be downloaded at runtime if needed
+  return true;
 }
