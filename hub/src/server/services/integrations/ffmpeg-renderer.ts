@@ -206,20 +206,33 @@ export async function renderVideo(options: FFmpegRenderOptions): Promise<FFmpegR
       console.log(`[FFmpeg] Encoding segment ${i + 1}/${imageCount}...`);
       options.onSegmentProgress?.(i + 1, imageCount);
 
-      // Single image → video clip (MPEG-TS for seamless concat)
-      // Optimized for speed on serverless:
-      //   - No -threads limit (use all available cores)
-      //   - 15fps (sufficient for static images, 37% less encoding work)
-      //   - CRF 30 (acceptable quality for slideshow, faster encoding)
+      // ── Pre-scale image to target resolution (one-time, fast) ──
+      // Avoids scaling every frame during encoding (huge speedup for large images)
+      const scaledPath = path.join(tempDir, `scaled-${i}.jpg`);
+      await runFFmpeg([
+        '-i', options.imagePaths[i],
+        '-vf', `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:force_original_aspect_ratio=increase,crop=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}`,
+        '-q:v', '2',
+        '-y',
+        scaledPath,
+      ]);
+
+      // ── Encode pre-scaled image → video clip ──
+      // Optimized for speed on serverless (Vercel throttles CPU on long tasks):
+      //   - 2fps: static images don't need more (7.5x less work vs 15fps)
+      //   - Pre-scaled input: no per-frame scaling needed
+      //   - CRF 30: fast encoding, YouTube re-encodes anyway
+      //   - No thread limit: use all available CPU cores
       await runFFmpeg([
         '-loop', '1',
-        '-i', options.imagePaths[i],
+        '-framerate', '2',
+        '-i', scaledPath,
         '-t', segmentDuration.toFixed(2),
-        '-vf', `scale=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT}:force_original_aspect_ratio=increase,crop=${OUTPUT_WIDTH}:${OUTPUT_HEIGHT},setsar=1,format=yuv420p`,
+        '-vf', 'format=yuv420p',
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
         '-crf', '30',
-        '-r', '15',
+        '-r', '2',
         '-an',  // No audio in segments
         '-y',
         segPath,
@@ -255,9 +268,12 @@ export async function renderVideo(options: FFmpegRenderOptions): Promise<FFmpegR
     const renderTime = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`[FFmpeg] ✅ Concat complete in ${renderTime}s`);
 
-    // ── Clean up segment files to save /tmp space ──
+    // ── Clean up segment + scaled image files to save /tmp space ──
     for (const segPath of segmentPaths) {
       try { await fs.unlink(segPath); } catch {}
+    }
+    for (let i = 0; i < imageCount; i++) {
+      try { await fs.unlink(path.join(tempDir, `scaled-${i}.jpg`)); } catch {}
     }
 
     // ── Read output ──
