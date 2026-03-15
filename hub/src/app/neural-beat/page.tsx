@@ -82,6 +82,32 @@ export default function NeuralBeatPage() {
     const interval = setInterval(async () => {
       try {
         const res = await fetch(`/api/neural-beat?statusId=${pipelineId}`);
+
+        // If pipeline not found (404), stop polling — server likely restarted
+        if (res.status === 404) {
+          clearInterval(interval);
+          pollIntervals.current.delete(pipelineId);
+          setProcessingIds((prev) => {
+            const next = new Map(prev);
+            next.delete(recordId);
+            return next;
+          });
+          setPipelineStatuses((prev) => ({
+            ...prev,
+            [recordId]: {
+              id: pipelineId,
+              recordId,
+              status: 'failed',
+              steps: [],
+              output: null,
+              error: 'Pipeline lost — server restarted. Please try again.',
+              startedAt: new Date().toISOString(),
+              completedAt: new Date().toISOString(),
+            },
+          }));
+          return;
+        }
+
         if (!res.ok) return;
         const data: PipelineStatus = await res.json();
 
@@ -102,7 +128,7 @@ export default function NeuralBeatPage() {
           }
         }
       } catch {
-        // ignore poll errors
+        // ignore transient poll errors (network blips)
       }
     }, 3000);
 
