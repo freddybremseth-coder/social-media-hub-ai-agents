@@ -176,7 +176,7 @@ export class NeuralBeatPipeline {
       markStepRunning(steps[currentStepIndex]);
       try {
         const renderResult = await renderAndWait({
-          templateId: 'neural-beat-music-video',
+          templateId: process.env.CREATOMATE_TEMPLATE_ID || 'f87fa856-4169-4ce8-8204-e066eabd1c60',
           audioUrl: audioUrl!,
           imageUrl: imageUrl!,
           title: songRecord.title,
