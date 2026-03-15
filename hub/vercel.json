@@ -1,15 +1,15 @@
 {
   "functions": {
     "api/neural-beat/route": {
-      "memory": 3009,
+      "memory": 1024,
       "maxDuration": 300
     },
     "src/app/api/neural-beat/route.ts": {
-      "memory": 3009,
+      "memory": 1024,
       "maxDuration": 300
     },
     "app/api/neural-beat/route.ts": {
-      "memory": 3009,
+      "memory": 1024,
       "maxDuration": 300
     }
   }
