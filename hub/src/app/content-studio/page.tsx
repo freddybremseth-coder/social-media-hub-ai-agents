@@ -8,7 +8,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Select } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
-import { Sparkles, Loader2, Copy, Check, Home, Bot, Leaf, User, Zap, Music, Youtube } from 'lucide-react';
+import { Sparkles, Loader2, Copy, Check, Home, Bot, Leaf, User, Zap, Music, Youtube, AlertCircle } from 'lucide-react';
 import { DEFAULT_BRANDS } from '@/lib/config/brands';
 import { PLATFORM_LIST } from '@/lib/config/platforms';
 import type { GeneratedContent } from '@/lib/types';
@@ -44,12 +44,17 @@ export default function ContentStudio() {
   const [result, setResult] = useState<GeneratedContent | null>(null);
   const [activeVariant, setActiveVariant] = useState(0);
   const [copied, setCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const handleGenerate = async () => {
     if (!selectedBrand || !selectedPlatform || !audience || !tone) return;
 
     setIsGenerating(true);
     setResult(null);
+    setError(null);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 90000); // 90s timeout
 
     try {
       const res = await fetch('/api/content/generate-viral', {
@@ -63,17 +68,23 @@ export default function ContentStudio() {
           tone,
           keyMessages: keyMessages.split(',').map(m => m.trim()).filter(Boolean),
         }),
+        signal: controller.signal,
       });
 
       const data = await res.json();
       if (res.ok && data && !data.error) {
         setResult(data);
       } else {
-        console.error('Generation failed:', data?.error || 'Unknown error');
+        setError(data?.error || `Generation failed (HTTP ${res.status})`);
       }
-    } catch (error) {
-      console.error('Generation failed:', error);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        setError('Generation timed out after 90 seconds. The AI agents may be overloaded — try again.');
+      } else {
+        setError(err instanceof Error ? err.message : 'Network error — check your connection');
+      }
     } finally {
+      clearTimeout(timeout);
       setIsGenerating(false);
     }
   };
@@ -81,6 +92,7 @@ export default function ContentStudio() {
   const handleQuickCommand = async (commandId: string) => {
     setIsGenerating(true);
     setResult(null);
+    setError(null);
 
     try {
       const res = await fetch('/api/freddy-commands', {
@@ -102,9 +114,11 @@ export default function ContentStudio() {
           recommendations: [],
           agents: ['Freddy Business Navigator'],
         });
+      } else {
+        setError(data?.error || `Quick command failed (HTTP ${res.status})`);
       }
-    } catch (error) {
-      console.error('Quick command failed:', error);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Network error — check your connection');
     } finally {
       setIsGenerating(false);
     }
@@ -400,7 +414,27 @@ export default function ContentStudio() {
             </>
           )}
 
-          {!isGenerating && !result && (
+          {error && !isGenerating && (
+            <Card className="border-red-500/50 bg-red-500/10">
+              <CardContent className="flex items-start gap-3 p-6">
+                <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-400" />
+                <div>
+                  <p className="font-medium text-red-400">Generation Failed</p>
+                  <p className="mt-1 text-sm text-red-300/80">{error}</p>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setError(null)}
+                    className="mt-3 text-red-300 hover:text-white hover:bg-red-500/20"
+                  >
+                    Dismiss
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {!isGenerating && !result && !error && (
             <Card className="bg-slate-800/50 border-slate-700/50">
               <CardContent className="flex flex-col items-center justify-center py-20">
                 <Sparkles className="h-12 w-12 text-slate-600" />

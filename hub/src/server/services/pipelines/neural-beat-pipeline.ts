@@ -1,5 +1,5 @@
 import { updateSongStatus, updateSongFields } from '@/server/services/integrations/airtable-client';
-import { analyzeSong, generateMusicCoverImage, generateYouTubeSEO } from '@/server/services/integrations/gemini-client';
+import { analyzeSong, generateMusicImageSet, generateYouTubeSEO } from '@/server/services/integrations/gemini-client';
 import { renderAndWait, uploadImageToTempHost } from '@/server/services/integrations/creatomate-client';
 import { uploadVideoFromUrl } from '@/server/services/integrations/youtube-client';
 import {
@@ -13,9 +13,9 @@ const STEP_NAMES = [
   'Update Airtable Status to Processing',
   'Download Audio File',
   'Analyze Song with AI',
-  'Generate Image Prompt & YouTube SEO',
-  'Generate Cover Image',
-  'Render Video with Creatomate',
+  'Generate YouTube SEO Metadata',
+  'Generate 10 Cover Images',
+  'Render Multi-Scene Video',
   'Wait for Render Completion',
   'Upload to YouTube',
   'Update Airtable with Results',
@@ -79,8 +79,7 @@ export class NeuralBeatPipeline {
     let audioUrl: string | null = null;
     let songAnalysis: Awaited<ReturnType<typeof analyzeSong>> | null = null;
     let youtubeMetadata: Awaited<ReturnType<typeof generateYouTubeSEO>> | null = null;
-    let imageUrl: string | null = null;
-    let imageBase64: string | null = null;
+    let imageUrls: string[] = [];
     let videoRenderUrl: string | null = null;
     let youtubeUrl: string | null = null;
 
@@ -158,27 +157,28 @@ export class NeuralBeatPipeline {
         throw new Error(`Step 4 failed: ${message}`);
       }
 
-      // Step 5: Gemini generates cover image
+      // Step 5: Gemini generates 10 cover images for slideshow video
       currentStepIndex = 4;
       markStepRunning(steps[currentStepIndex]);
       try {
-        const imageResult = await generateMusicCoverImage({
+        const imageSetResult = await generateMusicImageSet({
           title: songRecord.title,
           artist: songRecord.artist,
           genre: songAnalysis!.genre,
           style: songAnalysis!.style,
           mood: songAnalysis!.mood,
-          imagePrompt: youtubeMetadata!.imagePrompt,
+          energy: songAnalysis!.energy,
+          visualStyle: songAnalysis!.visualStyle,
+          count: 10,
         });
-        imageBase64 = imageResult.base64;
 
-        // Upload image to temp host for use in Creatomate and Airtable
-        // (both need a real URL, not a data URI)
-        const hostedUrl = await uploadImageToTempHost(
-          imageResult.base64,
-          imageResult.mimeType
+        // Upload all images to temp host for Creatomate
+        console.log(`[NeuralBeatPipeline] Uploading ${imageSetResult.images.length} images to temp host...`);
+        const uploadPromises = imageSetResult.images.map((img) =>
+          uploadImageToTempHost(img.base64, img.mimeType)
         );
-        imageUrl = hostedUrl;
+        imageUrls = await Promise.all(uploadPromises);
+        console.log(`[NeuralBeatPipeline] All ${imageUrls.length} images uploaded`);
         markStepCompleted(steps[currentStepIndex]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -186,13 +186,13 @@ export class NeuralBeatPipeline {
         throw new Error(`Step 5 failed: ${message}`);
       }
 
-      // Step 6: Creatomate renders video (audio + image with audio reactivity)
+      // Step 6: Creatomate renders multi-scene slideshow video
       currentStepIndex = 5;
       markStepRunning(steps[currentStepIndex]);
       try {
         const renderResult = await renderAndWait({
           audioUrl: audioUrl!,
-          imageUrl: imageUrl || undefined,
+          images: imageUrls,
           title: songRecord.title,
           subtitle: songRecord.artist,
         });
@@ -229,7 +229,7 @@ export class NeuralBeatPipeline {
           tags: youtubeMetadata!.tags,
           categoryId: youtubeMetadata!.categoryId,
           privacyStatus: youtubeMetadata!.privacyStatus || 'public',
-          thumbnailUrl: imageUrl!,
+          thumbnailUrl: imageUrls[0],
         });
         youtubeUrl = uploadResult.youtubeUrl;
         markStepCompleted(steps[currentStepIndex]);
@@ -259,7 +259,7 @@ export class NeuralBeatPipeline {
             tags: youtubeMetadata!.tags,
             processedAt: new Date().toISOString(),
           },
-          ...(imageUrl ? { imageUrl } : {}),
+          ...(imageUrls.length > 0 ? { imageUrl: imageUrls[0] } : {}),
         });
         markStepCompleted(steps[currentStepIndex]);
       } catch (error) {
@@ -275,7 +275,7 @@ export class NeuralBeatPipeline {
         youtubeUrl,
         songAnalysis,
         youtubeMetadata,
-        imageUrl,
+        imageUrls,
         videoRenderUrl,
       };
     } catch (error) {

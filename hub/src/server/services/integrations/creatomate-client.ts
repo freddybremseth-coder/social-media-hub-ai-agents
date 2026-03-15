@@ -17,6 +17,8 @@ export interface RenderOptions {
   audioUrl: string;
   imageUrl?: string;
   imageBase64?: string;
+  /** Multiple image URLs for slideshow-style video */
+  images?: string[];
   title?: string;
   subtitle?: string;
   outputFormat?: 'mp4' | 'gif';
@@ -220,9 +222,158 @@ function buildMusicVideoSource(
 }
 
 /**
+ * Build a multi-image slideshow composition JSON.
+ * Creates a dynamic music video with multiple images transitioning with
+ * Ken Burns zoom + crossfade effects, plus audio and text overlays.
+ */
+function buildMultiImageMusicVideoSource(
+  options: RenderOptions,
+  imageUrls: string[]
+): Record<string, any> {
+  const elements: Record<string, any>[] = [];
+  const imageCount = imageUrls.length;
+
+  // 1. Audio track — determines video duration
+  const audioElement: Record<string, any> = {
+    type: 'audio',
+    track: 1,
+    source: options.audioUrl,
+    audio_fade_out: 3,
+  };
+  if (options.duration) {
+    audioElement.duration = options.duration;
+  }
+  elements.push(audioElement);
+
+  // 2. Image elements — evenly distributed across the audio duration
+  // Each image has Ken Burns zoom and crossfade transition
+  // Note: we don't set an explicit duration on images, so they need a
+  // total duration reference. We'll use a generous default (210s = 3.5min)
+  // and let the audio determine the actual length. Each image segment
+  // overlaps slightly for smooth crossfade.
+  const estimatedDuration = options.duration || 210; // 3.5 minutes default
+  const segmentDuration = estimatedDuration / imageCount;
+  const fadeTime = 1.5; // crossfade overlap in seconds
+
+  // Alternate zoom direction for visual variety
+  const zoomPatterns = [
+    { from: '100%', to: '115%' },  // zoom in
+    { from: '115%', to: '100%' },  // zoom out
+    { from: '100%', to: '110%' },  // slow zoom in
+    { from: '110%', to: '100%' },  // slow zoom out
+  ];
+
+  imageUrls.forEach((url, i) => {
+    const startTime = i * segmentDuration;
+    const zoom = zoomPatterns[i % zoomPatterns.length];
+
+    elements.push({
+      type: 'image',
+      track: 2,
+      source: url,
+      time: startTime,
+      duration: segmentDuration + fadeTime, // slight overlap for crossfade
+      width: '100%',
+      height: '100%',
+      fit: 'cover',
+      // Ken Burns zoom with alternating direction
+      x_scale: [
+        { time: 0, value: zoom.from },
+        { time: 'end', value: zoom.to, easing: 'linear' },
+      ],
+      y_scale: [
+        { time: 0, value: zoom.from },
+        { time: 'end', value: zoom.to, easing: 'linear' },
+      ],
+      // Crossfade: fade in at start (except first image), fade out at end (except last)
+      animations: [
+        ...(i > 0
+          ? [{ type: 'fade', duration: fadeTime, easing: 'quadratic-out' }]
+          : []),
+        ...(i < imageCount - 1
+          ? [{ time: 'end', type: 'fade', duration: fadeTime, reversed: true }]
+          : []),
+      ],
+    });
+  });
+
+  // 3. Title text overlay (appears for first 8 seconds)
+  if (options.title) {
+    elements.push({
+      type: 'text',
+      track: 3,
+      text: options.title,
+      time: 1,
+      duration: 8,
+      y: '72%',
+      width: '80%',
+      height: '15%',
+      x_alignment: '50%',
+      y_alignment: '50%',
+      fill_color: '#ffffff',
+      font_size: '5.5 vmin',
+      font_weight: '800',
+      shadow_color: 'rgba(0,0,0,0.8)',
+      shadow_blur: 8,
+      shadow_x: 0,
+      shadow_y: 2,
+      animations: [
+        {
+          type: 'text-slide',
+          duration: 0.8,
+          easing: 'quadratic-out',
+          direction: 'up',
+          split: 'word',
+        },
+        {
+          time: 'end',
+          type: 'fade',
+          duration: 1,
+          reversed: true,
+        },
+      ],
+    });
+  }
+
+  // 4. Subtitle text overlay
+  if (options.subtitle) {
+    elements.push({
+      type: 'text',
+      track: 4,
+      text: options.subtitle,
+      time: 1.5,
+      duration: 7,
+      y: '82%',
+      width: '70%',
+      height: '8%',
+      x_alignment: '50%',
+      y_alignment: '50%',
+      fill_color: 'rgba(255,255,255,0.85)',
+      font_size: '3.5 vmin',
+      font_weight: '500',
+      shadow_color: 'rgba(0,0,0,0.6)',
+      shadow_blur: 6,
+      shadow_x: 0,
+      shadow_y: 1,
+      animations: [
+        { type: 'fade', duration: 0.6, easing: 'quadratic-out' },
+        { time: 'end', type: 'fade', duration: 1, reversed: true },
+      ],
+    });
+  }
+
+  return {
+    width: 1920,
+    height: 1080,
+    output_format: options.outputFormat || 'mp4',
+    elements,
+  };
+}
+
+/**
  * Start a video render using Creatomate API.
- * Uses source-based rendering to create a music video
- * with image background, audio, and text overlays.
+ * Uses source-based rendering to create a music video.
+ * Supports single-image or multi-image slideshow modes.
  *
  * Images are automatically uploaded to a temp host to avoid
  * Creatomate's API payload size limit.
@@ -231,20 +382,30 @@ export async function renderVideo(options: RenderOptions): Promise<RenderResult>
   const { apiKey } = getConfig();
   if (!apiKey) throw new Error('CREATOMATE_API_KEY is not configured');
 
-  // Resolve image (upload base64/data URLs to temp host)
-  const resolvedImageUrl = await resolveImageSource(options);
+  let source: Record<string, any>;
 
-  const source = buildMusicVideoSource(options, resolvedImageUrl);
+  // Multi-image mode: create slideshow composition
+  if (options.images && options.images.length > 1) {
+    source = buildMultiImageMusicVideoSource(options, options.images);
+    console.log('[Creatomate] Starting multi-image render with', {
+      imageCount: options.images.length,
+      audioUrl: options.audioUrl?.substring(0, 80) + '...',
+      title: options.title,
+      elementCount: source.elements.length,
+    });
+  } else {
+    // Single-image mode (backward compatible)
+    const resolvedImageUrl = options.images?.[0] || await resolveImageSource(options);
+    source = buildMusicVideoSource(options, resolvedImageUrl);
+    console.log('[Creatomate] Starting single-image render with', {
+      hasImage: !!resolvedImageUrl,
+      audioUrl: options.audioUrl?.substring(0, 80) + '...',
+      title: options.title,
+      elementCount: source.elements.length,
+    });
+  }
+
   const body: Record<string, any> = { source };
-
-  console.log('[Creatomate] Starting source-based render with', {
-    hasImage: !!resolvedImageUrl,
-    imageUrl: resolvedImageUrl?.substring(0, 80),
-    audioUrl: options.audioUrl?.substring(0, 80) + '...',
-    title: options.title,
-    subtitle: options.subtitle,
-    elementCount: source.elements.length,
-  });
 
   const res = await fetch(`${CREATOMATE_BASE_URL}/renders`, {
     method: 'POST',
