@@ -12,9 +12,9 @@
  *   - Audio track overlay (determines video duration)
  *   - 720p MP4 output with H.264 + AAC encoding
  *
- * Render time: ~15-40 seconds for a 3.5-minute video
+ * Render time: ~15-40s for a 3.5-minute video
  * Memory usage: ~200-400 MB (vs 800+ MB with xfade)
- * Cost: $0
+ * Cost: $0 (fully local rendering)
  */
 
 import { spawn } from 'child_process';
