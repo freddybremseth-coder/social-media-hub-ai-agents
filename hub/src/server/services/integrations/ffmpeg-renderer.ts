@@ -17,40 +17,76 @@ import { spawn } from 'child_process';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
 const execFileAsync = promisify(execFile);
 
 // ─── FFmpeg/FFprobe binary resolution ───────────────────────
-// Use bundled static binaries (ffmpeg-static/ffprobe-static) when available,
-// falling back to system-installed binaries. This is essential for Vercel
-// serverless deployment where system FFmpeg is not available.
+// Uses the vercel-labs/ffmpeg-on-vercel approach:
+// 1. Try process.cwd() + hardcoded relative path (works on Vercel serverless)
+// 2. Try require() resolution (works in local dev)
+// 3. Fall back to system PATH
+//
+// On Vercel, require('ffmpeg-static') uses __dirname which gets mangled by
+// Next.js webpack bundling. Using process.cwd() + relative path avoids this.
 
-let FFMPEG_PATH = 'ffmpeg';
-let FFPROBE_PATH = 'ffprobe';
+function resolveFFmpegPath(): string {
+  // Priority 1: Environment variable override
+  if (process.env.FFMPEG_PATH) return process.env.FFMPEG_PATH;
 
-try {
-  // ffmpeg-static exports the absolute path to the binary
-  const ffmpegStatic = require('ffmpeg-static');
-  if (ffmpegStatic && typeof ffmpegStatic === 'string') {
-    FFMPEG_PATH = ffmpegStatic;
-    console.log(`[FFmpeg] Using bundled binary: ${FFMPEG_PATH}`);
-  }
-} catch {
-  // Not installed, use system ffmpeg
+  // Priority 2: Bundled binary via process.cwd() (Vercel approach)
+  const cwdPath = path.join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg');
+  try {
+    fsSync.accessSync(cwdPath);
+    // Ensure binary is executable (may lose permissions during deployment)
+    try { fsSync.chmodSync(cwdPath, 0o755); } catch {}
+    return cwdPath;
+  } catch {}
+
+  // Priority 3: require() resolution (local development)
+  try {
+    const resolved = require('ffmpeg-static');
+    if (resolved && typeof resolved === 'string') return resolved;
+  } catch {}
+
+  // Fallback: system PATH
+  return 'ffmpeg';
 }
 
-try {
-  // ffprobe-static exports { path: '/absolute/path/to/ffprobe' }
-  const ffprobeStatic = require('ffprobe-static');
-  if (ffprobeStatic?.path && typeof ffprobeStatic.path === 'string') {
-    FFPROBE_PATH = ffprobeStatic.path;
-    console.log(`[FFmpeg] Using bundled ffprobe: ${FFPROBE_PATH}`);
-  }
-} catch {
-  // Not installed, use system ffprobe
+function resolveFFprobePath(): string {
+  // Priority 1: Environment variable override
+  if (process.env.FFPROBE_PATH) return process.env.FFPROBE_PATH;
+
+  // Priority 2: Bundled binary via process.cwd() (Vercel approach)
+  // ffprobe-static stores binaries in bin/<platform>/<arch>/ffprobe
+  const platform = os.platform();
+  const arch = os.arch();
+  const cwdPath = path.join(
+    process.cwd(), 'node_modules', 'ffprobe-static', 'bin',
+    platform, arch, platform === 'win32' ? 'ffprobe.exe' : 'ffprobe',
+  );
+  try {
+    fsSync.accessSync(cwdPath);
+    try { fsSync.chmodSync(cwdPath, 0o755); } catch {}
+    return cwdPath;
+  } catch {}
+
+  // Priority 3: require() resolution (local development)
+  try {
+    const resolved = require('ffprobe-static');
+    if (resolved?.path && typeof resolved.path === 'string') return resolved.path;
+  } catch {}
+
+  // Fallback: system PATH
+  return 'ffprobe';
 }
+
+// Resolve once at module load time
+const FFMPEG_PATH = resolveFFmpegPath();
+const FFPROBE_PATH = resolveFFprobePath();
+console.log(`[FFmpeg] Binary paths — ffmpeg: ${FFMPEG_PATH}, ffprobe: ${FFPROBE_PATH}`);
 
 // ─── Constants ──────────────────────────────────────────────
 
@@ -452,12 +488,24 @@ export async function cleanupRender(videoPath: string): Promise<void> {
 
 /**
  * Check if FFmpeg is available on this system.
+ * Ensures binary is executable before testing.
  */
 export async function isAvailable(): Promise<boolean> {
   try {
+    // Ensure executable permission (Vercel may strip it during deployment)
+    if (FFMPEG_PATH !== 'ffmpeg') {
+      try { fsSync.chmodSync(FFMPEG_PATH, 0o755); } catch {}
+    }
+    if (FFPROBE_PATH !== 'ffprobe') {
+      try { fsSync.chmodSync(FFPROBE_PATH, 0o755); } catch {}
+    }
     await execFileAsync(FFMPEG_PATH, ['-version']);
+    await execFileAsync(FFPROBE_PATH, ['-version']);
     return true;
-  } catch {
+  } catch (err) {
+    console.error('[FFmpeg] isAvailable check failed:', err instanceof Error ? err.message : err);
+    console.error('[FFmpeg] FFMPEG_PATH:', FFMPEG_PATH, 'exists:', fsSync.existsSync(FFMPEG_PATH));
+    console.error('[FFmpeg] FFPROBE_PATH:', FFPROBE_PATH, 'exists:', fsSync.existsSync(FFPROBE_PATH));
     return false;
   }
 }
@@ -469,12 +517,7 @@ export async function isAvailable(): Promise<boolean> {
 export function isConfigured(): boolean {
   // If using bundled static binary, check if the file exists
   if (FFMPEG_PATH !== 'ffmpeg') {
-    try {
-      require('fs').accessSync(FFMPEG_PATH);
-      return true;
-    } catch {
-      return false;
-    }
+    return fsSync.existsSync(FFMPEG_PATH);
   }
   // Fallback: check system PATH
   try {
