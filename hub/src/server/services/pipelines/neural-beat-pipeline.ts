@@ -18,7 +18,7 @@ const STEP_NAMES = [
   'Download Audio File',
   'Analyze Song with AI',
   'Generate YouTube SEO Metadata',
-  'Generate 10 Cover Images',
+  'Generate 6 Cover Images',
   'Render Video with FFmpeg',
   'Upload to YouTube',
   'Update Airtable with Results',
@@ -197,7 +197,7 @@ export class NeuralBeatPipeline {
           mood: songAnalysis!.mood,
           energy: songAnalysis!.energy,
           visualStyle: songAnalysis!.visualStyle,
-          count: 8, // 8 images for a good slideshow balance
+          count: 6, // 6 images — start smaller, scale up if successful
         });
 
         // Save images to local temp files (no need to upload to tmpfiles.org!)

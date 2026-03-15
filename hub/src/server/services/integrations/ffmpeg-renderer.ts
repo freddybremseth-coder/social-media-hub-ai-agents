@@ -37,7 +37,7 @@ const execFileAsync = promisify(execFile);
 const FFMPEG_TMP_PATH = path.join(os.tmpdir(), 'ffmpeg');
 // ffmpeg-static v5.3.0 uses release tag b6.1.1
 const FFMPEG_RELEASE_TAG = 'b6.1.1';
-const FFMPEG_DOWNLOAD_URL = `https://github.com/eugeneware/ffmpeg-static/releases/download/${FFMPEG_RELEASE_TAG}/linux-x64`;
+const FFMPEG_DOWNLOAD_URL = `https://github.com/eugeneware/ffmpeg-static/releases/download/${FFMPEG_RELEASE_TAG}/ffmpeg-linux-x64`;
 
 let _ffmpegPath: string | null = null;
 
