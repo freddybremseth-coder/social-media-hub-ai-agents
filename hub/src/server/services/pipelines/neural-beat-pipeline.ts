@@ -1,13 +1,11 @@
 import { updateSongStatus, updateSongFields } from '@/server/services/integrations/airtable-client';
-import { analyzeSong, generateMusicCoverImage } from '@/server/services/integrations/gemini-client';
+import { analyzeSong, generateMusicCoverImage, generateYouTubeSEO } from '@/server/services/integrations/gemini-client';
 import { renderAndWait } from '@/server/services/integrations/creatomate-client';
 import { uploadVideoFromUrl } from '@/server/services/integrations/youtube-client';
-import { YouTubeAgent } from '@/server/agents/youtube-agent';
 import {
   AirtableSongRecord,
   PipelineRun,
   PipelineStep,
-  YouTubeVideoMetadata,
 } from '@/lib/types';
 import { generateId } from '@/lib/utils';
 
@@ -74,7 +72,7 @@ export class NeuralBeatPipeline {
     let currentStepIndex = 0;
     let audioUrl: string | null = null;
     let songAnalysis: Awaited<ReturnType<typeof analyzeSong>> | null = null;
-    let youtubeMetadata: YouTubeVideoMetadata | null = null;
+    let youtubeMetadata: Awaited<ReturnType<typeof generateYouTubeSEO>> | null = null;
     let imageUrl: string | null = null;
     let videoRenderUrl: string | null = null;
     let youtubeUrl: string | null = null;
@@ -135,22 +133,17 @@ export class NeuralBeatPipeline {
         throw new Error(`Step 3 failed: ${message}`);
       }
 
-      // Step 4: Claude generates image prompt + YouTube SEO
+      // Step 4: Gemini generates YouTube SEO metadata
       currentStepIndex = 3;
       markStepRunning(steps[currentStepIndex]);
       try {
-        const youtubeAgent = new YouTubeAgent();
-        const seoResult = await youtubeAgent.run({
-          task: 'generate_youtube_seo',
-          input: {
-            title: songRecord.title,
-            artist: songRecord.artist,
-            genre: songAnalysis!.genre,
-            style: songAnalysis!.style,
-            mood: songAnalysis!.mood,
-          },
+        youtubeMetadata = await generateYouTubeSEO({
+          title: songRecord.title,
+          artist: songRecord.artist,
+          genre: songAnalysis!.genre,
+          style: songAnalysis!.style,
+          mood: songAnalysis!.mood,
         });
-        youtubeMetadata = seoResult.metadata;
         markStepCompleted(steps[currentStepIndex]);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

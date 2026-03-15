@@ -1,5 +1,4 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { createMessage } from '@/lib/ai/anthropic-client';
 
 let genAI: GoogleGenerativeAI | null = null;
 
@@ -13,8 +12,26 @@ function getClient(): GoogleGenerativeAI {
 }
 
 /**
+ * Send a text prompt to Gemini and get a text response.
+ */
+async function askGemini(
+  prompt: string,
+  options?: { temperature?: number; maxTokens?: number }
+): Promise<string> {
+  const client = getClient();
+  const model = client.getGenerativeModel({ model: 'gemini-2.0-flash' });
+  const result = await model.generateContent({
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: options?.temperature ?? 0.7,
+      maxOutputTokens: options?.maxTokens ?? 1000,
+    },
+  });
+  return result.response.text();
+}
+
+/**
  * Generate an image using Google Gemini's image generation capabilities.
- * Returns the generated image as base64 data.
  */
 export async function generateImage(
   prompt: string,
@@ -53,8 +70,8 @@ export async function generateImage(
 }
 
 /**
- * Use Claude to analyze a song title/metadata and generate an optimized image prompt.
- * Then use Gemini to generate the actual image.
+ * Generate a music cover image using Gemini for both the prompt and the image.
+ * No Anthropic dependency.
  */
 export async function generateMusicCoverImage(
   options: {
@@ -67,44 +84,34 @@ export async function generateMusicCoverImage(
     bpm?: number;
   }
 ): Promise<{ imageUrl: string; base64: string; mimeType: string; prompt: string }> {
-  // If an image prompt is already provided, use it directly
-  if (options.imagePrompt) {
-    const image = await generateImage(options.imagePrompt, {
-      style: 'cinematic digital art, vibrant neon colors, high contrast',
-      aspectRatio: '16:9',
-    });
-    const imageUrl = `data:${image.mimeType};base64,${image.base64}`;
-    return { ...image, prompt: options.imagePrompt, imageUrl };
-  }
+  let imagePrompt = options.imagePrompt;
 
-  // Step 1: Use Claude to create an optimized image generation prompt
-  const analysisPrompt = `Du er en kreativ art director for musikkvisualer.
+  if (!imagePrompt) {
+    // Use Gemini to create an optimized image generation prompt
+    const analysisPrompt = `You are a creative art director for music visuals.
 
-Analyser denne sangen og lag en visuelt slående bildebeskrivelse for musikkvideoens cover/thumbnail:
+Create a visually striking image description for a music video cover/thumbnail:
 
-Tittel: "${options.title}"
-${options.genre ? `Sjanger: ${options.genre}` : ''}
-${options.mood ? `Stemning: ${options.mood}` : ''}
-${options.style ? `Stil: ${options.style}` : ''}
+Title: "${options.title}"
+${options.genre ? `Genre: ${options.genre}` : ''}
+${options.mood ? `Mood: ${options.mood}` : ''}
+${options.style ? `Style: ${options.style}` : ''}
 ${options.bpm ? `BPM: ${options.bpm}` : ''}
 ${options.artist ? `Artist: ${options.artist}` : ''}
 
-Lag en detaljert bildeprompt (på engelsk) som:
-1. Matcher musikkens energi og stemning
-2. Er visuelt dramatisk og eye-catching for YouTube
-3. Bruker neon-farger, abstrakte former, eller futuristiske elementer for EDM
-4. IKKE inneholder tekst, logoer eller ansikter
-5. Er optimalisert for 16:9 YouTube thumbnail
+Create a detailed image prompt (in English) that:
+1. Matches the music's energy and mood
+2. Is visually dramatic and eye-catching for YouTube
+3. Uses neon colors, abstract shapes, or futuristic elements for EDM
+4. Does NOT contain text, logos, or faces
+5. Is optimized for 16:9 YouTube thumbnail
 
-Svar KUN med bildeprompt-teksten, ingen forklaring.`;
+Reply ONLY with the image prompt text, no explanation.`;
 
-  const imagePrompt = await createMessage(
-    'Du er en ekspert på visuell kunst og musikkvisualer.',
-    analysisPrompt,
-    { temperature: 0.8, maxTokens: 500 }
-  );
+    imagePrompt = await askGemini(analysisPrompt, { temperature: 0.8, maxTokens: 500 });
+  }
 
-  // Step 2: Generate the image with Gemini
+  // Generate the image with Gemini
   const image = await generateImage(imagePrompt.trim(), {
     style: 'cinematic digital art, vibrant neon colors, high contrast',
     aspectRatio: '16:9',
@@ -115,7 +122,8 @@ Svar KUN med bildeprompt-teksten, ingen forklaring.`;
 }
 
 /**
- * Analyze a song's characteristics using Claude AI.
+ * Analyze a song's characteristics using Gemini AI.
+ * No Anthropic dependency.
  */
 export async function analyzeSong(
   options: {
@@ -134,30 +142,27 @@ export async function analyzeSong(
   targetAudience: string;
 }> {
   const metadata = options.metadata;
-  const prompt = `Analyser denne EDM/elektroniske sangen basert på tilgjengelig informasjon:
+  const prompt = `You are a music analyst specialized in EDM and electronic music.
+Analyze this song based on the available information and respond in valid JSON only.
 
-Tittel: "${options.title}"
+Title: "${options.title}"
 ${options.artist ? `Artist: ${options.artist}` : ''}
-${metadata?.genre ? `Antatt sjanger: ${metadata.genre}` : ''}
-${metadata?.mood ? `Antatt stemning: ${metadata.mood}` : ''}
+${metadata?.genre ? `Assumed genre: ${metadata.genre}` : ''}
+${metadata?.mood ? `Assumed mood: ${metadata.mood}` : ''}
 ${metadata?.bpm ? `BPM: ${metadata.bpm}` : ''}
 
-Svar i JSON-format:
+Respond with ONLY this JSON structure, no markdown:
 {
-  "genre": "hovedsjanger",
-  "subGenre": "undersjanger",
-  "style": "musikkstil (f.eks. progressive, minimal, melodic)",
-  "mood": "stemning (f.eks. euphoric, dark, chill, energetic)",
+  "genre": "main genre",
+  "subGenre": "sub genre",
+  "style": "music style (e.g., progressive, minimal, melodic)",
+  "mood": "mood (e.g., euphoric, dark, chill, energetic)",
   "energy": "low|medium|high",
-  "visualStyle": "beskrivelse av visuell stil som passer musikken",
-  "targetAudience": "målgruppe for denne typen musikk"
+  "visualStyle": "description of visual style that fits the music",
+  "targetAudience": "target audience for this type of music"
 }`;
 
-  const result = await createMessage(
-    'Du er en musikkanalytiker spesialisert på EDM og elektronisk musikk. Svar alltid i gyldig JSON.',
-    prompt,
-    { temperature: 0.3, maxTokens: 500 }
-  );
+  const result = await askGemini(prompt, { temperature: 0.3, maxTokens: 500 });
 
   try {
     const jsonMatch = result.match(/\{[\s\S]*\}/);
@@ -174,6 +179,64 @@ Svar i JSON-format:
     energy: 'high',
     visualStyle: 'Neon cyberpunk with abstract geometric shapes',
     targetAudience: 'EDM fans and electronic music lovers',
+  };
+}
+
+/**
+ * Generate YouTube SEO metadata using Gemini.
+ * Replaces the YouTubeAgent (which required Anthropic).
+ */
+export async function generateYouTubeSEO(
+  options: {
+    title: string;
+    artist?: string;
+    genre: string;
+    style: string;
+    mood: string;
+  }
+): Promise<{
+  title: string;
+  description: string;
+  tags: string[];
+  categoryId: string;
+  privacyStatus: string;
+  imagePrompt: string;
+}> {
+  const prompt = `You are a YouTube SEO expert for music channels.
+Generate optimized YouTube metadata for this EDM/electronic track.
+
+Track: "${options.title}"
+Artist: ${options.artist || 'Neural Beat'}
+Genre: ${options.genre}
+Style: ${options.style}
+Mood: ${options.mood}
+
+Respond with ONLY this JSON, no markdown:
+{
+  "title": "YouTube video title (catchy, includes artist name, max 60 chars)",
+  "description": "YouTube description (500-800 chars, include genre tags, mood, artist info, relevant hashtags at the end)",
+  "tags": ["tag1", "tag2", "tag3", "...up to 15 relevant tags for YouTube SEO"],
+  "categoryId": "10",
+  "privacyStatus": "public",
+  "imagePrompt": "A vivid image prompt for the video thumbnail (abstract, neon, no text/faces)"
+}`;
+
+  const result = await askGemini(prompt, { temperature: 0.7, maxTokens: 800 });
+
+  try {
+    const jsonMatch = result.match(/\{[\s\S]*\}/);
+    if (jsonMatch) return JSON.parse(jsonMatch[0]);
+  } catch {
+    // fallback
+  }
+
+  return {
+    title: `${options.artist || 'Neural Beat'} - ${options.title} [${options.genre}]`,
+    description: `${options.title} by ${options.artist || 'Neural Beat'}. Genre: ${options.genre}. Mood: ${options.mood}.\n\n#EDM #${options.genre.replace(/\s/g, '')} #ElectronicMusic #NeuralBeat`,
+    tags: [options.genre, options.mood, options.style, 'EDM', 'Electronic Music', 'Neural Beat', options.title],
+    categoryId: '10',
+    privacyStatus: 'public',
+    imagePrompt: `Abstract neon visualization for ${options.genre} music, ${options.mood} mood, vibrant colors, no text`,
   };
 }
 
