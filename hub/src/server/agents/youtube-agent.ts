@@ -1,4 +1,5 @@
 import { BaseAgent } from './base-agent';
+import { NORWEGIAN_CONTENT_RULES, CLEAN_OUTPUT_RULES } from '@/lib/text-utils';
 import type { AgentTask } from '@/lib/types';
 
 export class YouTubeAgent extends BaseAgent {
@@ -365,6 +366,10 @@ REGLER:
 - Soekbare, ikke clickbait
 - CTA i HVER video
 
-TONE: Energisk, informativ, inspirerende. Snak direkte til seeren.`;
+TONE: Energisk, informativ, inspirerende. Snak direkte til seeren.
+
+${NORWEGIAN_CONTENT_RULES}
+
+${CLEAN_OUTPUT_RULES}`;
   }
 }

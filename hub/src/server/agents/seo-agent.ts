@@ -1,4 +1,5 @@
 import { BaseAgent } from './base-agent';
+import { NORWEGIAN_CONTENT_RULES, CLEAN_OUTPUT_RULES } from '@/lib/text-utils';
 import type { AgentTask } from '@/lib/types';
 
 export class SEOAgent extends BaseAgent {
@@ -154,6 +155,10 @@ Your approach:
 - Data-driven strategy
 - Long-term sustainable growth
 
-Always provide actionable, implementable recommendations.`;
+Always provide actionable, implementable recommendations.
+
+${NORWEGIAN_CONTENT_RULES}
+
+${CLEAN_OUTPUT_RULES}`;
   }
 }

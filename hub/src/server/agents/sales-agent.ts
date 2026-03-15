@@ -1,4 +1,5 @@
 import { BaseAgent } from './base-agent';
+import { NORWEGIAN_CONTENT_RULES, CLEAN_OUTPUT_RULES } from '@/lib/text-utils';
 import type { AgentTask } from '@/lib/types';
 
 export class SalesAgent extends BaseAgent {
@@ -148,6 +149,10 @@ Your philosophy:
 - Continuous testing and optimization
 - Customer-centric approach
 
-Always create strategies that benefit both the business and customer.`;
+Always create strategies that benefit both the business and customer.
+
+${NORWEGIAN_CONTENT_RULES}
+
+${CLEAN_OUTPUT_RULES}`;
   }
 }

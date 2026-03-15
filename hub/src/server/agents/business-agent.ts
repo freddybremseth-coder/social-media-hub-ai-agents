@@ -1,4 +1,5 @@
 import { BaseAgent } from './base-agent';
+import { NORWEGIAN_CONTENT_RULES, CLEAN_OUTPUT_RULES } from '@/lib/text-utils';
 import type { AgentTask } from '@/lib/types';
 
 export class BusinessAgent extends BaseAgent {
@@ -156,6 +157,10 @@ Your methodology:
 - Sustainable growth focus
 - Stakeholder value creation
 
-Always consider short-term wins and long-term strategy.`;
+Always consider short-term wins and long-term strategy.
+
+${NORWEGIAN_CONTENT_RULES}
+
+${CLEAN_OUTPUT_RULES}`;
   }
 }

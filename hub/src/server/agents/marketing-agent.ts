@@ -1,4 +1,5 @@
 import { BaseAgent } from './base-agent';
+import { NORWEGIAN_CONTENT_RULES, CLEAN_OUTPUT_RULES } from '@/lib/text-utils';
 import type { AgentTask } from '@/lib/types';
 
 export class MarketingAgent extends BaseAgent {
@@ -148,6 +149,10 @@ Your approach:
 - Trend analysis and prediction
 - Creative yet strategic thinking
 
-Always provide actionable insights backed by reasoning.`;
+Always provide actionable insights backed by reasoning.
+
+${NORWEGIAN_CONTENT_RULES}
+
+${CLEAN_OUTPUT_RULES}`;
   }
 }

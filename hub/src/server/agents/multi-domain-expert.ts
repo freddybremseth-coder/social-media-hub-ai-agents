@@ -1,5 +1,6 @@
 import { BaseAgent } from './base-agent';
 import { DOMAIN_EXPERT_MODULES } from './domain-experts';
+import { NORWEGIAN_CONTENT_RULES, CLEAN_OUTPUT_RULES } from '@/lib/text-utils';
 import type { AgentTask } from '@/lib/types';
 
 /**
@@ -52,6 +53,16 @@ export class MultiDomainExpertAgent extends BaseAgent {
             break;
           case 'cross_brand_narrative':
             task.result = await this.buildCrossBrandNarrative(task.parameters);
+            break;
+          case 'create_script':
+            task.result = await this.createVideoScript(task.parameters);
+            break;
+          case 'generate_youtube_seo':
+            task.result = await this.generateYouTubeSEOContent(task.parameters);
+            break;
+          default:
+            // Fallback: treat unknown task types as general content creation
+            task.result = await this.createDomainContent(task.parameters);
             break;
         }
 
@@ -203,6 +214,84 @@ Lag innhold som:
     return this.callAI(prompt);
   }
 
+  private async createVideoScript(params: any): Promise<string> {
+    const module = DOMAIN_EXPERT_MODULES[this.currentDomain];
+
+    const prompt = `Du er en ekspert YouTube-innholdsskaper for ${module.businessDomain}.
+
+Lag et komplett YouTube-videomanus.
+
+Emne: ${params.topic || params.task}
+Brand: ${params.brand || 'Freddy Bremseth'}
+Maalgruppe: ${params.audience || 'Norske entreprenoerer'}
+Varighet: ${params.duration || '8-12 minutter'}
+Tone: ${params.tone || 'engasjerende og informativ'}
+
+Strukturer manuset slik:
+1. HOOK (foerste 15 sekunder) - Fang oppmerksomheten umiddelbart
+2. INTRO (30 sek) - Presenter emnet og hva seeren vil laere
+3. HOVEDDEL (5-8 min) - 3-5 noekkelpunkter med eksempler
+4. OPPSUMMERING (1-2 min) - Hovedtakeaways
+5. CTA - Abonner, kommenter, del
+
+VIKTIGE REGLER:
+- Skriv paa norsk med korrekt rettskriving
+- ALDRI bruk stor bokstav midt i en setning (kun for egennavn)
+- ALDRI bruk ** eller && eller lignende formatering
+- Bruk normal tekst uten markdown-formatering
+- Skriv naturlig og engasjerende
+
+Gi ogsaa:
+- 5 tittelforslag (under 60 tegn)
+- Kort thumbnail-beskrivelse
+- 10 relevante tags`;
+
+    return this.callAI(prompt);
+  }
+
+  private async generateYouTubeSEOContent(params: any): Promise<string> {
+    const module = DOMAIN_EXPERT_MODULES[this.currentDomain];
+
+    const prompt = `Du er en YouTube SEO-ekspert for ${module.businessDomain}.
+
+Lag komplett YouTube SEO-innhold for denne videoen/tracken:
+
+Tittel: ${params.title || params.task}
+Artist/Brand: ${params.artist || params.brand || 'Neural Beat'}
+Sjanger: ${params.genre || 'Elektronisk musikk'}
+Stemning: ${params.mood || 'energisk'}
+
+Lag foelgende:
+
+1. SEO-OPTIMALISERT TITTEL
+   - Under 60 tegn
+   - Inkluder noekkelsoekeord
+   - Ikke clickbait, men klikk-verdig
+
+2. BESKRIVELSE (2000+ tegn)
+   - Foerste 2 linjer er kritiske (vises i soek)
+   - Inkluder timestamps hvis relevant
+   - Relevante lenker og sosiale medier
+   - Naturlig keyword-integrering
+
+3. TAGS (20-30 stk)
+   - Mix av brede og spesifikke
+   - Inkluder sjanger, stemning, og artister
+
+4. INNHOLDSSTRATEGI
+   - Beste publiseringstid
+   - Thumbnail-konsept
+   - End screen-anbefalinger
+   - Shorts-klipp fra videoen
+
+VIKTIGE REGLER:
+- Skriv paa norsk med korrekt rettskriving
+- ALDRI bruk ** eller && eller formatering
+- Ren tekst, ingen markdown`;
+
+    return this.callAI(prompt);
+  }
+
   async analyzeData(data: any): Promise<any> {
     const module = DOMAIN_EXPERT_MODULES[this.currentDomain];
 
@@ -250,6 +339,10 @@ API-integrasjoner du kan bruke:
 ${module.apiIntegrations.join(', ')}
 
 SKILL PARAMETERS:
-${JSON.stringify(module.skillParameters, null, 2)}`;
+${JSON.stringify(module.skillParameters, null, 2)}
+
+${NORWEGIAN_CONTENT_RULES}
+
+${CLEAN_OUTPUT_RULES}`;
   }
 }

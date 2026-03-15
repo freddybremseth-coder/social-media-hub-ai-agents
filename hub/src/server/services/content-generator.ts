@@ -3,6 +3,7 @@ import { SalesAgent } from '../agents/sales-agent';
 import { SEOAgent } from '../agents/seo-agent';
 import { BusinessAgent } from '../agents/business-agent';
 import { createMessage } from '@/lib/ai/anthropic-client';
+import { stripMarkdownFormatting, NORWEGIAN_CONTENT_RULES, CLEAN_OUTPUT_RULES } from '@/lib/text-utils';
 import type { ContentBrief, GeneratedContent } from '@/lib/types';
 
 export type { ContentBrief, GeneratedContent };
@@ -104,34 +105,39 @@ export class ContentGenerator {
     brief: ContentBrief,
     context: any
   ): Promise<string> {
-    const systemPrompt = 'You are a world-class content creator specializing in viral social media content. You understand platform algorithms, audience psychology, and viral mechanics. Create content that gets shared, liked, and commented on.';
+    const systemPrompt = `You are a world-class content creator specializing in viral social media content. You understand platform algorithms, audience psychology, and viral mechanics. Create content that gets shared, liked, and commented on.
 
-    const userPrompt = `Create viral ${brief.platform} content for ${brief.brand}.
+${NORWEGIAN_CONTENT_RULES}
 
-Specifications:
-- Platform: ${brief.platform}
-- Goal: ${brief.goal}
-- Target Audience: ${brief.audience}
+${CLEAN_OUTPUT_RULES}`;
+
+    const userPrompt = `Lag viralt ${brief.platform}-innhold for ${brief.brand}.
+
+Spesifikasjoner:
+- Plattform: ${brief.platform}
+- Maal: ${brief.goal}
+- Maalgruppe: ${brief.audience}
 - Tone: ${brief.tone}
-- Key Messages: ${brief.keyMessages?.join(', ')}
-- Max Length: ${brief.constraints?.maxLength || 'standard'}
+- Noekkelmeldinger: ${brief.keyMessages?.join(', ')}
+- Maks lengde: ${brief.constraints?.maxLength || 'standard for plattformen'}
 
-Guidelines:
-1. Hook the audience in the first sentence
-2. Make it shareable and engaging
-3. Include power words and emotional triggers
-4. Add call-to-action
-5. Optimize for the platform's algorithm
-${brief.goal === 'conversion' ? '6. Drive conversions without being pushy' : ''}
+Retningslinjer:
+1. Fang oppmerksomheten i foerste setning (hook)
+2. Gjoer det delbart og engasjerende
+3. Bruk sterke ord og emosjonelle triggere
+4. Legg til en tydelig call-to-action
+5. Optimaliser for plattformens algoritme
+${brief.goal === 'conversion' ? '6. Driv konverteringer uten aa vaere pushy' : ''}
 
-Marketing Insights: ${JSON.stringify(context.marketingInsights)}
+Marketing-innsikt: ${JSON.stringify(context.marketingInsights)}
 
-Generate the content. Make it viral-worthy!`;
+Generer innholdet. Skriv paa norsk med ren tekst — ingen markdown-formatering!`;
 
-    return createMessage(systemPrompt, userPrompt, {
+    const raw = await createMessage(systemPrompt, userPrompt, {
       temperature: 0.8,
       maxTokens: 1500,
     });
+    return stripMarkdownFormatting(raw);
   }
 
   private async generateVariants(
@@ -139,19 +145,24 @@ Generate the content. Make it viral-worthy!`;
     brief: ContentBrief,
     count: number
   ): Promise<string[]> {
-    const systemPrompt = 'You are expert at creating multiple variations of content that each have different appeal angles but maintain the same core message.';
+    const systemPrompt = `You are expert at creating multiple variations of content that each have different appeal angles but maintain the same core message.
 
-    const userPrompt = `Create ${count} different variations of this ${brief.platform} post:
+${NORWEGIAN_CONTENT_RULES}
+
+${CLEAN_OUTPUT_RULES}`;
+
+    const userPrompt = `Lag ${count} forskjellige varianter av dette ${brief.platform}-innlegget:
 
 Original: ${originalContent}
 
-Requirements:
-- Different angle/hook for each variant
-- Same key message but different approach
-- Maintain ${brief.tone} tone
-- Keep platform ${brief.platform} best practices
+Krav:
+- Forskjellig vinkel/hook for hver variant
+- Samme kjernemelding men ulik tilnaerming
+- Behold ${brief.tone} tone
+- Foelg ${brief.platform} best practices
+- Skriv paa norsk med ren tekst — ingen markdown
 
-Generate only the content, one variant per line separated by ---`;
+Generer KUN innholdet, en variant per seksjon separert med ---`;
 
     const response = await createMessage(systemPrompt, userPrompt, {
       temperature: 0.9,
@@ -159,7 +170,7 @@ Generate only the content, one variant per line separated by ---`;
     });
 
     const lines = response.split('---')
-      .map((line: string) => line.trim())
+      .map((line: string) => stripMarkdownFormatting(line.trim()))
       .filter((line: string) => line.length > 0);
     return lines.slice(0, count);
   }
