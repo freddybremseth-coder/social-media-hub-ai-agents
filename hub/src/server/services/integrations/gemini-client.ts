@@ -31,7 +31,21 @@ async function askGemini(
 }
 
 /**
+ * Race a promise against a timeout.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Timeout after ${ms / 1000}s: ${label}`)), ms);
+    promise.then(
+      (val) => { clearTimeout(timer); resolve(val); },
+      (err) => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
+
+/**
  * Generate an image using Google Gemini's image generation capabilities.
+ * Includes a 60-second timeout per image to prevent pipeline hangs.
  */
 export async function generateImage(
   prompt: string,
@@ -47,12 +61,17 @@ export async function generateImage(
     : `${prompt}. Aspect ratio: ${options?.aspectRatio || '16:9'}`;
 
   const model = client.getGenerativeModel({ model: 'gemini-2.5-flash-image' });
-  const result = await model.generateContent({
-    contents: [{ role: 'user', parts: [{ text: `Generate an image: ${enhancedPrompt}` }] }],
-    generationConfig: {
-      responseModalities: ['TEXT', 'IMAGE'] as any,
-    } as any,
-  });
+
+  const result = await withTimeout(
+    model.generateContent({
+      contents: [{ role: 'user', parts: [{ text: `Generate an image: ${enhancedPrompt}` }] }],
+      generationConfig: {
+        responseModalities: ['TEXT', 'IMAGE'] as any,
+      } as any,
+    }),
+    60_000,
+    'Gemini image generation',
+  );
 
   const response = result.response;
   const parts = response.candidates?.[0]?.content?.parts || [];
@@ -214,8 +233,9 @@ function getMoodCategory(mood: string, energy: string): string {
 
 /**
  * Generate a set of cover images for a music video slideshow.
- * Creates 10 unique images based on the song's mood and energy.
- * Images are generated in batches of 3 to avoid rate limits.
+ * Creates unique images based on the song's mood and energy.
+ * Images are generated in batches of 2 with delays to avoid rate limits.
+ * Minimum 3 images required; accepts partial results on failures.
  */
 export async function generateMusicImageSet(
   options: {
@@ -229,7 +249,7 @@ export async function generateMusicImageSet(
     count?: number;
   }
 ): Promise<{ images: Array<{ base64: string; mimeType: string; prompt: string }> }> {
-  const count = options.count || 10;
+  const count = Math.min(options.count || 8, 10); // Default 8, max 10
   const moodCategory = getMoodCategory(options.mood || 'energetic', options.energy || 'high');
   const themes = MOOD_VISUAL_THEMES[moodCategory] || MOOD_VISUAL_THEMES.energetic;
 
@@ -243,47 +263,79 @@ export async function generateMusicImageSet(
 
   console.log(`[Gemini] Generating ${count} images for mood: ${moodCategory}`);
 
-  // Generate images in batches of 3 to avoid rate limits
-  const batchSize = 3;
+  // Generate images in batches of 2 (smaller batches = less rate limit risk)
+  const batchSize = 2;
   const results: Array<{ base64: string; mimeType: string; prompt: string }> = [];
+  let consecutiveFailures = 0;
 
   for (let i = 0; i < enhancedPrompts.length; i += batchSize) {
+    // If we have enough images and are hitting failures, stop early
+    if (results.length >= 3 && consecutiveFailures >= 2) {
+      console.warn(`[Gemini] Stopping early with ${results.length} images after ${consecutiveFailures} consecutive failures`);
+      break;
+    }
+
     const batch = enhancedPrompts.slice(i, i + batchSize);
+    const batchNum = Math.floor(i / batchSize) + 1;
+    const totalBatches = Math.ceil(enhancedPrompts.length / batchSize);
+    console.log(`[Gemini] Batch ${batchNum}/${totalBatches} (${batch.length} images)...`);
+
+    const batchStartTime = Date.now();
     const batchResults = await Promise.all(
       batch.map(async (prompt, batchIndex) => {
+        const imgNum = i + batchIndex + 1;
         try {
+          const startMs = Date.now();
           const image = await generateImage(prompt, {
             style: 'cinematic photography, high contrast, dramatic lighting',
             aspectRatio: '16:9',
           });
-          console.log(`[Gemini] Image ${i + batchIndex + 1}/${count} generated`);
+          const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
+          console.log(`[Gemini] Image ${imgNum}/${count} generated (${elapsed}s)`);
+          consecutiveFailures = 0;
           return { ...image, prompt };
         } catch (err) {
-          console.warn(`[Gemini] Image ${i + batchIndex + 1} failed, retrying...`, err);
-          // Retry once
+          const errMsg = err instanceof Error ? err.message : String(err);
+          console.warn(`[Gemini] Image ${imgNum} failed: ${errMsg}`);
+
+          // Retry once after a short delay
+          await new Promise((resolve) => setTimeout(resolve, 2000));
           try {
             const image = await generateImage(prompt, {
               style: 'cinematic digital art, vibrant colors',
               aspectRatio: '16:9',
             });
+            console.log(`[Gemini] Image ${imgNum} succeeded on retry`);
+            consecutiveFailures = 0;
             return { ...image, prompt };
-          } catch {
-            console.error(`[Gemini] Image ${i + batchIndex + 1} failed permanently`);
+          } catch (retryErr) {
+            const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+            console.error(`[Gemini] Image ${imgNum} failed permanently: ${retryMsg}`);
+            consecutiveFailures++;
             return null;
           }
         }
       })
     );
-    results.push(...batchResults.filter((r): r is NonNullable<typeof r> => r !== null));
 
-    // Small delay between batches to avoid rate limits
+    const succeeded = batchResults.filter((r): r is NonNullable<typeof r> => r !== null);
+    results.push(...succeeded);
+
+    const batchElapsed = ((Date.now() - batchStartTime) / 1000).toFixed(1);
+    console.log(`[Gemini] Batch ${batchNum} done: ${succeeded.length}/${batch.length} succeeded (${batchElapsed}s). Total: ${results.length}/${count}`);
+
+    // Delay between batches to avoid rate limits (3 seconds)
     if (i + batchSize < enhancedPrompts.length) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await new Promise((resolve) => setTimeout(resolve, 3000));
     }
   }
 
   if (results.length === 0) {
-    throw new Error('Failed to generate any images for the music video');
+    throw new Error('Failed to generate any images for the music video. Check Gemini API key and rate limits.');
+  }
+
+  if (results.length < 3) {
+    console.warn(`[Gemini] Only ${results.length} images generated (minimum 3 recommended)`);
   }
 
   console.log(`[Gemini] Successfully generated ${results.length}/${count} images`);

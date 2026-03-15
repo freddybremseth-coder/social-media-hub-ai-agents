@@ -163,10 +163,11 @@ export class NeuralBeatPipeline {
         throw new Error(`Step 4 failed: ${message}`);
       }
 
-      // Step 5: Gemini generates 10 cover images — saved locally for FFmpeg
+      // Step 5: Gemini generates cover images — saved locally for FFmpeg
       currentStepIndex = 4;
       markStepRunning(steps[currentStepIndex]);
       try {
+        console.log('[NeuralBeatPipeline] Starting image generation with Gemini...');
         const imageSetResult = await generateMusicImageSet({
           title: songRecord.title,
           artist: songRecord.artist,
@@ -175,7 +176,7 @@ export class NeuralBeatPipeline {
           mood: songAnalysis!.mood,
           energy: songAnalysis!.energy,
           visualStyle: songAnalysis!.visualStyle,
-          count: 10,
+          count: 8, // 8 images for a good slideshow balance
         });
 
         // Save images to local temp files (no need to upload to tmpfiles.org!)
